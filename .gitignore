@@ -4,4 +4,6 @@ target/
 .vim
 .idea
 .DS_Store
+xcuserdata/
+*.xcuserstate
 /assets/man/zellij.1

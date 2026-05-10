@@ -143,9 +143,13 @@ impl ClientConnectionBus {
         } else {
             axum::extract::ws::close_code::NORMAL
         };
+        self.close_connection_with_reason(code, "Connection closed");
+    }
+
+    pub fn close_connection_with_reason(&mut self, code: u16, reason: impl Into<String>) {
         let close_frame = CloseFrame {
             code,
-            reason: "Connection closed".into(),
+            reason: reason.into().into(),
         };
         let close_message = Message::Close(Some(close_frame));
         match self.control_channel_tx.as_ref() {

@@ -173,9 +173,28 @@ pub struct CreateClientIdResponse {
     pub is_read_only: bool,
 }
 
+#[derive(Serialize)]
+pub struct SessionListResponse {
+    pub sessions: Vec<SessionListItem>,
+}
+
+#[derive(Serialize)]
+pub struct SessionListItem {
+    pub name: String,
+    pub status: SessionStatus,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Live,
+    Resurrectable,
+}
+
 #[derive(Deserialize)]
 pub struct TerminalParams {
     pub web_client_id: String,
+    pub create: Option<bool>,
 }
 
 #[derive(Deserialize)]

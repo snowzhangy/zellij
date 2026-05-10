@@ -29,6 +29,7 @@ pub fn zellij_server_listener(
     web_client_id: String,
     session_manager: Arc<dyn SessionManager>,
     attachment_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    allow_create: bool,
 ) {
     let _server_listener_thread = std::thread::Builder::new()
         .name("server_listener".to_string())
@@ -100,6 +101,20 @@ pub fn zellij_server_listener(
 
 
                     let session_exists = session_manager.session_exists(&session_name).unwrap_or(false);
+                    let can_resurrect = !session_exists
+                        && session_manager
+                            .get_resurrection_layout(&session_name)
+                            .is_some();
+
+                    if !session_exists && !can_resurrect && !allow_create {
+                        log::error!(
+                            "Session {:?} does not exist and terminal attach did not allow creation.",
+                            session_name
+                        );
+                        client_connection_bus
+                            .close_connection_with_reason(4404, "Session not found");
+                        return;
+                    }
 
                     if is_read_only && !session_exists {
                         log::error!("Read only tokens cannot create new sessions.");

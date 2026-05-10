@@ -1,5 +1,8 @@
 use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
-use crate::web_client::types::{AppState, CreateClientIdResponse, LoginRequest, LoginResponse};
+use crate::web_client::types::{
+    AppState, CreateClientIdResponse, LoginRequest, LoginResponse, SessionListItem,
+    SessionListResponse, SessionStatus,
+};
 use crate::web_client::utils::{get_mime_type, parse_cookies};
 use axum::{
     extract::{Path as AxumPath, Request, State},
@@ -10,7 +13,11 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use include_dir;
 use uuid::Uuid;
-use zellij_utils::{consts::VERSION, web_authentication_tokens::create_session_token};
+use zellij_utils::{
+    consts::VERSION,
+    sessions::{get_resurrectable_sessions, get_sessions},
+    web_authentication_tokens::create_session_token,
+};
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -140,6 +147,39 @@ pub async fn create_new_client(
         web_client_id,
         is_read_only,
     }))
+}
+
+pub async fn list_sessions_handler() -> Result<
+    Json<SessionListResponse>,
+    (StatusCode, Json<String>),
+> {
+    match get_sessions() {
+        Ok(sessions) => {
+            let mut session_items: Vec<SessionListItem> = sessions
+                .into_iter()
+                .map(|(name, _)| SessionListItem {
+                    name,
+                    status: SessionStatus::Live,
+                })
+                .collect();
+            for (name, _) in get_resurrectable_sessions() {
+                if !session_items.iter().any(|session| session.name == name) {
+                    session_items.push(SessionListItem {
+                        name,
+                        status: SessionStatus::Resurrectable,
+                    });
+                }
+            }
+            session_items.sort_by(|left, right| left.name.cmp(&right.name));
+            Ok(Json(SessionListResponse {
+                sessions: session_items,
+            }))
+        },
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json("Failed to list sessions".to_string()),
+        )),
+    }
 }
 
 pub async fn get_static_asset(AxumPath(path): AxumPath<String>) -> impl IntoResponse {
