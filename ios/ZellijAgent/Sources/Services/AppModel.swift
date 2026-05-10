@@ -33,7 +33,10 @@ final class AppModel: ObservableObject {
     private var hasStarted = false
     private var reconnectTask: Task<Void, Never>?
     private var sessionRefreshTask: Task<Void, Never>?
+    private var resizeTask: Task<Void, Never>?
+    private var connectionGeneration: UInt64 = 0
     private var cancellables: Set<AnyCancellable> = []
+    private static let resizeDebounceNanoseconds: UInt64 = 150_000_000
 
     private enum ConnectResult {
         case connected
@@ -97,6 +100,7 @@ final class AppModel: ObservableObject {
         connectionState = .connecting
         terminalBuffer.clear()
         reconnectTask?.cancel()
+        connectionGeneration &+= 1
         reconnectTask = Task { [weak self] in
             await self?.connectWithRetry(
                 profile: profile,
@@ -105,7 +109,8 @@ final class AppModel: ObservableObject {
                 allowCreate: false,
                 persistSessionNameOnSuccess: nil,
                 showPickerOnFailure: true,
-                initialFailureMessage: nil
+                initialFailureMessage: nil,
+                generation: connectionGeneration
             )
         }
     }
@@ -115,6 +120,8 @@ final class AppModel: ObservableObject {
         startupTask?.cancel()
         reconnectTask?.cancel()
         sessionRefreshTask?.cancel()
+        resizeTask?.cancel()
+        resizeTask = nil
         isLoadingSessions = false
         let oldTransport = transport
         transport = nil
@@ -151,6 +158,7 @@ final class AppModel: ObservableObject {
         recordConnectionEvent("reconnect scheduled\(reason.map { ": \($0)" } ?? "")")
         connectionState = .reconnecting
         reconnectTask?.cancel()
+        connectionGeneration &+= 1
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
@@ -161,7 +169,8 @@ final class AppModel: ObservableObject {
                 allowCreate: false,
                 persistSessionNameOnSuccess: nil,
                 showPickerOnFailure: true,
-                initialFailureMessage: reason
+                initialFailureMessage: reason,
+                generation: connectionGeneration
             )
         }
     }
@@ -194,6 +203,17 @@ final class AppModel: ObservableObject {
 
     func sendResize(rows: Int, cols: Int) {
         lastResize = TerminalResize(rows: rows, cols: cols)
+        resizeTask?.cancel()
+        resizeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.resizeDebounceNanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.sendResizeNow(rows: rows, cols: cols)
+        }
+    }
+
+    private func sendResizeNow(rows: Int, cols: Int) {
+        resizeTask?.cancel()
+        resizeTask = nil
         Task { [weak self] in
             try? await self?.transport?.sendResize(rows: rows, cols: cols)
         }
@@ -229,6 +249,7 @@ final class AppModel: ObservableObject {
         sessionListError = nil
         connectionState = .connecting
         reconnectTask?.cancel()
+        connectionGeneration &+= 1
         reconnectTask = Task { [weak self] in
             await self?.connectWithRetry(
                 profile: profile,
@@ -237,7 +258,8 @@ final class AppModel: ObservableObject {
                 allowCreate: false,
                 persistSessionNameOnSuccess: session.name,
                 showPickerOnFailure: true,
-                initialFailureMessage: nil
+                initialFailureMessage: nil,
+                generation: connectionGeneration
             )
         }
     }
@@ -262,6 +284,7 @@ final class AppModel: ObservableObject {
         sessionListError = nil
         connectionState = .connecting
         reconnectTask?.cancel()
+        connectionGeneration &+= 1
         reconnectTask = Task { [weak self] in
             await self?.connectWithRetry(
                 profile: profile,
@@ -270,7 +293,8 @@ final class AppModel: ObservableObject {
                 allowCreate: true,
                 persistSessionNameOnSuccess: trimmed,
                 showPickerOnFailure: true,
-                initialFailureMessage: nil
+                initialFailureMessage: nil,
+                generation: connectionGeneration
             )
         }
     }
@@ -322,18 +346,21 @@ final class AppModel: ObservableObject {
         allowCreate: Bool,
         persistSessionNameOnSuccess: String?,
         showPickerOnFailure: Bool,
-        initialFailureMessage: String?
+        initialFailureMessage: String?,
+        generation: UInt64
     ) async {
         let maxAttempts = showPickerOnFailure ? 2 : 1
         var lastFailureMessage = initialFailureMessage
 
         for attempt in 1...maxAttempts {
+            guard !Task.isCancelled, generation == connectionGeneration else { return }
             let result = await connect(
                 profile: profile,
                 token: token,
                 isReconnect: isReconnect,
                 allowCreate: allowCreate,
-                persistSessionNameOnSuccess: persistSessionNameOnSuccess
+                persistSessionNameOnSuccess: persistSessionNameOnSuccess,
+                generation: generation
             )
             switch result {
             case .connected, .handled:
@@ -346,6 +373,7 @@ final class AppModel: ObservableObject {
         }
 
         guard showPickerOnFailure else { return }
+        guard generation == connectionGeneration else { return }
         activeSession = nil
         sessionListError = lastFailureMessage ?? "Connection failed."
         lastSessionListSummary = "Connection failed. Choose a session or retry."
@@ -359,7 +387,8 @@ final class AppModel: ObservableObject {
         token: String,
         isReconnect: Bool,
         allowCreate: Bool,
-        persistSessionNameOnSuccess: String? = nil
+        persistSessionNameOnSuccess: String? = nil,
+        generation: UInt64
     ) async -> ConnectResult {
         let transport = ZellijWebTransport(profile: profile, authToken: token)
         wireTransportLog(transport)
@@ -400,11 +429,19 @@ final class AppModel: ObservableObject {
         self.transport = transport
 
         do {
+            guard generation == connectionGeneration else {
+                transport.disconnect()
+                return .handled
+            }
             let session = try await transport.connect(
                 rows: lastResize.rows,
                 cols: lastResize.cols,
                 allowCreate: allowCreate
             )
+            guard generation == connectionGeneration else {
+                transport.disconnect()
+                return .handled
+            }
             activeSession = session
             connectedAt = Date()
             recordConnectionEvent("connected webClientID=\(session.webClientID) version=\(session.version ?? "unknown") readOnly=\(session.isReadOnly)")
@@ -416,6 +453,10 @@ final class AppModel: ObservableObject {
             connectionState = .connected(version: session.version)
             return .connected
         } catch {
+            guard generation == connectionGeneration else {
+                transport.disconnect()
+                return .handled
+            }
             recordConnectionEvent("connect failed: \(error.localizedDescription)")
             if self.transport === transport {
                 self.transport = nil
@@ -519,7 +560,7 @@ final class AppModel: ObservableObject {
         switch event {
         case .queryTerminalSize:
             recordConnectionEvent("control QueryTerminalSize")
-            sendResize(rows: lastResize.rows, cols: lastResize.cols)
+            sendResizeNow(rows: lastResize.rows, cols: lastResize.cols)
         case .switchedSession(let session):
             terminalBuffer.append("\n[Switched to \(session)]\n")
         case .log(let lines):
