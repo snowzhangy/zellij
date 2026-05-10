@@ -75,6 +75,7 @@ final class ZellijWebTransport {
     var onControlEvent: ((ZellijControlEvent) -> Void)?
     var onClose: ((WebSocketClose) -> Void)?
     var onObservedPublicKeyHash: ((String) -> Void)?
+    var onLog: ((String) -> Void)?
 
     private let profile: ZellijProfile
     private let authToken: String
@@ -103,12 +104,17 @@ final class ZellijWebTransport {
 
     func connect(rows: Int, cols: Int, allowCreate: Bool = false) async throws -> ZellijSession {
         isClosedIntentionally = false
+        onLog?("transport login")
         try await login()
+        onLog?("transport fetch version")
         let version = try? await fetchVersion()
+        onLog?("transport fetch sessions")
         let sessions = try await fetchSessionList()
         if !allowCreate && !sessions.contains(where: { $0.name == profile.sessionName }) {
+            onLog?("transport session missing \(profile.sessionName)")
             throw TransportError.sessionNotFound(profile.sessionName, sessions)
         }
+        onLog?("transport create web client")
         let client = try await createClient()
         let zellijSession = ZellijSession(
             webClientID: client.webClientID,
@@ -117,26 +123,33 @@ final class ZellijWebTransport {
         )
         self.zellijSession = zellijSession
 
+        onLog?("transport open control websocket")
         try await openControlSocket()
         try await receiveInitialControlEvent()
         startControlReceiveLoop()
+        onLog?("transport open terminal websocket")
         try await openTerminalSocket(webClientID: client.webClientID, allowCreate: allowCreate)
         try await sendResize(rows: rows, cols: cols)
+        onLog?("transport sent resize rows=\(rows) cols=\(cols)")
         startTerminalReceiveLoop()
         return zellijSession
     }
 
     func fetchSessions() async throws -> [SessionListItem] {
+        onLog?("transport login for sessions")
         try await login()
+        onLog?("transport fetch sessions")
         return try await fetchSessionList()
     }
 
     func fetchServerVersion() async throws -> String {
-        try await fetchVersion()
+        onLog?("transport fetch version")
+        return try await fetchVersion()
     }
 
     func disconnect() {
         isClosedIntentionally = true
+        onLog?("transport disconnect")
         receiveTasks.forEach { $0.cancel() }
         receiveTasks.removeAll()
         controlTask?.cancel(with: .goingAway, reason: nil)
@@ -263,7 +276,9 @@ final class ZellijWebTransport {
                 }
             } catch {
                 if !isClosedIntentionally {
-                    onClose?(webSocketClose(channel: "control", task: task, error: error))
+                    let close = webSocketClose(channel: "control", task: task, error: error)
+                    onLog?(close.message)
+                    onClose?(close)
                 }
                 break
             }
@@ -284,7 +299,9 @@ final class ZellijWebTransport {
                 }
             } catch {
                 if !isClosedIntentionally {
-                    onClose?(webSocketClose(channel: "terminal", task: task, error: error))
+                    let close = webSocketClose(channel: "terminal", task: task, error: error)
+                    onLog?(close.message)
+                    onClose?(close)
                 }
                 break
             }

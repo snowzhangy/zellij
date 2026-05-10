@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var certificatePrompt: CertificatePrompt?
     @Published var lastObservedPublicKeyHash: String?
     @Published var optionAsMetaKey = true
+    @Published private(set) var connectionLog: [ConnectionLogEntry] = []
     @Published private(set) var lastResize = TerminalResize(rows: 28, cols: 90)
 
     var settingsStore = SettingsStore()
@@ -56,13 +57,16 @@ final class AppModel: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        recordConnectionEvent("app start")
         guard selectedProfile != nil else {
+            recordConnectionEvent("show settings: no profile")
             showingSettings = true
             return
         }
         guard let profile = selectedProfile,
               let token = try? KeychainStore.token(profileID: profile.id),
               !token.isEmpty else {
+            recordConnectionEvent("show settings: missing token")
             showingSettings = true
             return
         }
@@ -79,14 +83,17 @@ final class AppModel: ObservableObject {
 
     func connect() {
         guard let profile = selectedProfile else {
+            recordConnectionEvent("connect skipped: no profile")
             showingSettings = true
             return
         }
         guard let token = try? KeychainStore.token(profileID: profile.id), !token.isEmpty else {
+            recordConnectionEvent("connect skipped: missing token")
             showingSettings = true
             return
         }
         startupTask?.cancel()
+        recordConnectionEvent("connect \(profile.baseURL.absoluteString) session=\(profile.sessionName)")
         connectionState = .connecting
         terminalBuffer.clear()
         reconnectTask?.cancel()
@@ -104,6 +111,7 @@ final class AppModel: ObservableObject {
     }
 
     func disconnect() {
+        recordConnectionEvent("disconnect")
         startupTask?.cancel()
         reconnectTask?.cancel()
         sessionRefreshTask?.cancel()
@@ -118,6 +126,7 @@ final class AppModel: ObservableObject {
     func trustPendingCertificate() {
         guard let profile = selectedProfile,
               let prompt = certificatePrompt else { return }
+        recordConnectionEvent("certificate trusted")
         settingsStore.updateTrustedPublicKeyHash(prompt.observedHash, for: profile.id)
         certificatePrompt = nil
         showingCertificateTrust = false
@@ -125,6 +134,7 @@ final class AppModel: ObservableObject {
     }
 
     func rejectPendingCertificate() {
+        recordConnectionEvent("certificate rejected")
         certificatePrompt = nil
         showingCertificateTrust = false
         disconnect()
@@ -138,6 +148,7 @@ final class AppModel: ObservableObject {
               !token.isEmpty else {
             return
         }
+        recordConnectionEvent("reconnect scheduled\(reason.map { ": \($0)" } ?? "")")
         connectionState = .reconnecting
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
@@ -213,6 +224,7 @@ final class AppModel: ObservableObject {
             return
         }
         profile.sessionName = session.name
+        recordConnectionEvent("attach session \(session.name)")
         missingSessionName = nil
         sessionListError = nil
         connectionState = .connecting
@@ -245,6 +257,7 @@ final class AppModel: ObservableObject {
             return
         }
         profile.sessionName = trimmed
+        recordConnectionEvent("create session \(trimmed)")
         missingSessionName = nil
         sessionListError = nil
         connectionState = .connecting
@@ -269,11 +282,13 @@ final class AppModel: ObservableObject {
             sessionListError = "Missing profile or auth token."
             return
         }
+        recordConnectionEvent("refresh sessions \(profile.baseURL.absoluteString)")
         isLoadingSessions = true
         sessionListError = nil
         sessionRefreshTask?.cancel()
         sessionRefreshTask = Task { [weak self] in
             let transport = ZellijWebTransport(profile: profile, authToken: token)
+            self?.wireTransportLog(transport)
             transport.onObservedPublicKeyHash = { [weak self] hash in
                 Task { @MainActor in
                     self?.lastObservedPublicKeyHash = hash
@@ -284,6 +299,7 @@ final class AppModel: ObservableObject {
                 let version = try? await transport.fetchServerVersion()
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
+                    self?.recordConnectionEvent("session list loaded count=\(sessions.count)\(version.map { " version=\($0)" } ?? "")")
                     self?.availableSessions = sessions
                     let versionText = version.map { " Zellij \($0)" } ?? ""
                     self?.lastSessionListSummary = "\(sessions.count) session\(sessions.count == 1 ? "" : "s") from \(profile.baseURL.absoluteString)\(versionText)"
@@ -292,6 +308,7 @@ final class AppModel: ObservableObject {
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
+                    self?.recordConnectionEvent("session list failed: \(error.localizedDescription)")
                     self?.handleSessionRefreshError(error, baseURL: profile.baseURL)
                 }
             }
@@ -345,6 +362,7 @@ final class AppModel: ObservableObject {
         persistSessionNameOnSuccess: String? = nil
     ) async -> ConnectResult {
         let transport = ZellijWebTransport(profile: profile, authToken: token)
+        wireTransportLog(transport)
         transport.onTerminalData = { [weak self] data in
             Task { @MainActor in
                 self?.terminalStream.append(data)
@@ -389,6 +407,7 @@ final class AppModel: ObservableObject {
             )
             activeSession = session
             connectedAt = Date()
+            recordConnectionEvent("connected webClientID=\(session.webClientID) version=\(session.version ?? "unknown") readOnly=\(session.isReadOnly)")
             if let persistSessionNameOnSuccess {
                 settingsStore.updateSessionName(persistSessionNameOnSuccess, for: profile.id)
                 missingSessionName = nil
@@ -397,6 +416,7 @@ final class AppModel: ObservableObject {
             connectionState = .connected(version: session.version)
             return .connected
         } catch {
+            recordConnectionEvent("connect failed: \(error.localizedDescription)")
             if self.transport === transport {
                 self.transport = nil
                 transport.disconnect()
@@ -435,6 +455,7 @@ final class AppModel: ObservableObject {
     }
 
     private func handleImmediateWebSocketClose(_ reason: String) {
+        recordConnectionEvent("immediate websocket close: \(reason)")
         let hint = "The server closed the web session immediately. For existing Zellij sessions, start or enable the session with web_sharing \"on\"."
         let message = "\(reason)\n\(hint)"
         transport?.disconnect()
@@ -449,6 +470,7 @@ final class AppModel: ObservableObject {
     }
 
     private func handleSessionNotFoundClose(profile: ZellijProfile, reason: String) {
+        recordConnectionEvent("session not found close: \(profile.sessionName) \(reason)")
         transport?.disconnect()
         transport = nil
         activeSession = nil
@@ -496,6 +518,7 @@ final class AppModel: ObservableObject {
     private func handleControlEvent(_ event: ZellijControlEvent) {
         switch event {
         case .queryTerminalSize:
+            recordConnectionEvent("control QueryTerminalSize")
             sendResize(rows: lastResize.rows, cols: lastResize.cols)
         case .switchedSession(let session):
             terminalBuffer.append("\n[Switched to \(session)]\n")
@@ -504,6 +527,7 @@ final class AppModel: ObservableObject {
         case .logError(let lines):
             terminalBuffer.append(lines.joined(separator: "\n") + "\n")
         case .setConfig(_, let macOptionIsMeta):
+            recordConnectionEvent("control SetConfig macOptionIsMeta=\(macOptionIsMeta.map { String($0) } ?? "nil")")
             if let macOptionIsMeta {
                 optionAsMetaKey = macOptionIsMeta
             }
@@ -533,6 +557,25 @@ final class AppModel: ObservableObject {
         self.monitor = monitor
     }
 
+    var diagnosticLogText: String {
+        connectionLog.map { $0.copyLine }.joined(separator: "\n")
+    }
+
+    private func wireTransportLog(_ transport: ZellijWebTransport) {
+        transport.onLog = { [weak self] message in
+            Task { @MainActor in
+                self?.recordConnectionEvent(message)
+            }
+        }
+    }
+
+    private func recordConnectionEvent(_ message: String) {
+        connectionLog.append(ConnectionLogEntry(message: message))
+        if connectionLog.count > 50 {
+            connectionLog.removeFirst(connectionLog.count - 50)
+        }
+    }
+
     private nonisolated static func interfaceTypes(for path: NWPath) -> Set<NWInterface.InterfaceType> {
         Set(
             [
@@ -543,6 +586,20 @@ final class AppModel: ObservableObject {
                 .other
             ].filter { path.usesInterfaceType($0) }
         )
+    }
+}
+
+struct ConnectionLogEntry: Identifiable, Equatable {
+    let id = UUID()
+    let timestamp = Date()
+    let message: String
+
+    var displayLine: String {
+        "\(timestamp.formatted(date: .omitted, time: .standard)) \(message)"
+    }
+
+    var copyLine: String {
+        "\(timestamp.formatted(date: .numeric, time: .standard)) \(message)"
     }
 }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -10,6 +11,7 @@ struct SettingsView: View {
     @State private var sessionName = ""
     @State private var authToken = ""
     @State private var trustedPublicKeyHash = ""
+    @State private var touchMode: TouchMode = .scroll
     @State private var errorMessage: String?
 
     var body: some View {
@@ -63,10 +65,34 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Touch") {
+                    Picker("Mode", selection: $touchMode) {
+                        ForEach(TouchMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    Text(touchMode.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 if let errorMessage {
                     Section {
                         Text(errorMessage)
                             .foregroundStyle(.red)
+                    }
+                }
+
+                if !model.connectionLog.isEmpty {
+                    Section("Diagnostics") {
+                        ForEach(model.connectionLog.suffix(8)) { entry in
+                            Text(entry.displayLine)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                        }
+                        Button("Copy Diagnostics") {
+                            UIPasteboard.general.string = model.diagnosticLogText
+                        }
                     }
                 }
             }
@@ -96,6 +122,7 @@ struct SettingsView: View {
         baseURL = profile.baseURL.absoluteString
         sessionName = profile.sessionName
         trustedPublicKeyHash = profile.trustedPublicKeyHash ?? ""
+        touchMode = profile.touchMode
         authToken = (try? KeychainStore.token(profileID: profile.id)) ?? ""
     }
 
@@ -113,7 +140,8 @@ struct SettingsView: View {
             name: name.isEmpty ? url.host ?? "Mac" : name,
             baseURL: url,
             sessionName: sessionName.trimmingCharacters(in: .whitespacesAndNewlines),
-            trustedPublicKeyHash: trustedPublicKeyHash.isEmpty ? nil : trustedPublicKeyHash
+            trustedPublicKeyHash: trustedPublicKeyHash.isEmpty ? nil : trustedPublicKeyHash,
+            touchMode: touchMode
         )
         model.settingsStore.upsertProfile(profile, token: authToken)
         model.connect()

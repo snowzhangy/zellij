@@ -43,6 +43,16 @@ const MAX_PENDING_BYTES: usize = 10 * 1024 * 1024;
 /// while still retrying stuck terminals.
 const PENDING_DRAIN_TIMEOUT: Duration = Duration::from_millis(10);
 
+/// Maximum resize retries for a terminal id whose PTY fd is not ready yet.
+///
+/// Terminal ids are reserved before the PTY fd is inserted. During startup or
+/// layout changes, resize instructions can reach this thread in that small
+/// window. Keep the last resize around briefly instead of dropping it.
+///
+/// TODO: fix the spawn-path ordering so terminal id reservation and fd
+/// readiness are synchronized before screen/tab code can emit pty resizes.
+const MAX_PENDING_RESIZE_RETRIES: usize = 200;
+
 /// A chunk of bytes waiting to be written to a terminal's stdin.
 struct PendingWrite {
     bytes: Vec<u8>,
@@ -50,14 +60,23 @@ struct PendingWrite {
     _completion: Option<NotificationEnd>,
 }
 
+struct PendingResize {
+    columns: u16,
+    rows: u16,
+    width_in_pixels: Option<u16>,
+    height_in_pixels: Option<u16>,
+    retries: usize,
+}
+
 pub(crate) fn pty_writer_main(bus: Bus<PtyWriteInstruction>) -> Result<()> {
     let err_context = || "failed to write to pty".to_string();
     let mut pending: HashMap<u32, VecDeque<PendingWrite>> = HashMap::new();
+    let mut pending_resizes: HashMap<u32, PendingResize> = HashMap::new();
 
     loop {
         // If we have pending writes, use a short timeout so we can keep
         // draining. Otherwise, block until a new instruction arrives.
-        let has_pending = pending.values().any(|q| !q.is_empty());
+        let has_pending = pending.values().any(|q| !q.is_empty()) || !pending_resizes.is_empty();
         let event = if has_pending {
             match bus.recv_timeout(PENDING_DRAIN_TIMEOUT) {
                 Ok(pair) => Some(pair),
@@ -109,7 +128,7 @@ pub(crate) fn pty_writer_main(bus: Bus<PtyWriteInstruction>) -> Result<()> {
                     width_in_pixels,
                     height_in_pixels,
                 ) => {
-                    os_input
+                    if os_input
                         .set_terminal_size_using_terminal_id(
                             terminal_id,
                             columns,
@@ -118,7 +137,21 @@ pub(crate) fn pty_writer_main(bus: Bus<PtyWriteInstruction>) -> Result<()> {
                             height_in_pixels,
                         )
                         .with_context(err_context)
-                        .non_fatal();
+                        .is_err()
+                    {
+                        pending_resizes.insert(
+                            terminal_id,
+                            PendingResize {
+                                columns,
+                                rows,
+                                width_in_pixels,
+                                height_in_pixels,
+                                retries: 0,
+                            },
+                        );
+                    } else {
+                        pending_resizes.remove(&terminal_id);
+                    }
                 },
                 PtyWriteInstruction::StartCachingResizes => {
                     // we do this because there are some logic traps inside the screen/tab/layout code
@@ -137,6 +170,35 @@ pub(crate) fn pty_writer_main(bus: Bus<PtyWriteInstruction>) -> Result<()> {
                 PtyWriteInstruction::Exit => {
                     return Ok(());
                 },
+            }
+        }
+
+        let terminal_ids: Vec<u32> = pending_resizes.keys().copied().collect();
+        for terminal_id in terminal_ids {
+            let Some(resize) = pending_resizes.get_mut(&terminal_id) else {
+                continue;
+            };
+            resize.retries = resize.retries.saturating_add(1);
+            if resize.retries > MAX_PENDING_RESIZE_RETRIES {
+                log::error!(
+                    "dropping resize for terminal {} after {} retries",
+                    terminal_id,
+                    MAX_PENDING_RESIZE_RETRIES,
+                );
+                pending_resizes.remove(&terminal_id);
+                continue;
+            }
+            if os_input
+                .set_terminal_size_using_terminal_id(
+                    terminal_id,
+                    resize.columns,
+                    resize.rows,
+                    resize.width_in_pixels,
+                    resize.height_in_pixels,
+                )
+                .is_ok()
+            {
+                pending_resizes.remove(&terminal_id);
             }
         }
 

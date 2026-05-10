@@ -372,9 +372,8 @@ impl UnixPtyBackend {
                 }
             },
             _ => {
-                Err::<(), _>(anyhow!("failed to find terminal fd for id {terminal_id}"))
-                    .with_context(err_context)
-                    .non_fatal();
+                return Err(anyhow!("failed to find terminal fd for id {terminal_id}"))
+                    .with_context(err_context);
             },
         }
         Ok(())

@@ -143,4 +143,35 @@ final class ZellijWireCodecTests: XCTestCase {
         XCTAssertTrue(prompt.message.contains("Expected:"))
         XCTAssertTrue(prompt.message.contains("bb:bb:bb:bb:bb:bb:bb:bb"))
     }
+
+    func testProfileDecodingDefaultsTouchModeForExistingSettings() throws {
+        let data = Data("""
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "name": "Mac",
+          "baseURL": "https://127.0.0.1:8082",
+          "sessionName": "zellij",
+          "trustedPublicKeyHash": null
+        }
+        """.utf8)
+
+        let profile = try JSONDecoder().decode(ZellijProfile.self, from: data)
+        XCTAssertEqual(profile.touchMode, .scroll)
+    }
+
+    func testSettingsMergeNewDefaultSnippets() {
+        let settings = AppSettings(
+            profiles: [],
+            selectedProfileID: nil,
+            fontSize: 12,
+            promptHistory: [],
+            snippets: ["/resume"]
+        )
+
+        let merged = settings.mergingDefaultSnippets()
+        XCTAssertEqual(merged.snippets.first, "/resume")
+        XCTAssertTrue(merged.snippets.contains("/model"))
+        XCTAssertTrue(merged.snippets.contains("/status"))
+        XCTAssertEqual(merged.snippets.filter { $0 == "/resume" }.count, 1)
+    }
 }

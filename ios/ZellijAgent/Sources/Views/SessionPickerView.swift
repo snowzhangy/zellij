@@ -101,7 +101,7 @@ private extension SessionListStatus {
         case .resurrectable:
             return "Saved"
         case .unknown:
-            return "Unknown"
+            return "Available"
         }
     }
 }

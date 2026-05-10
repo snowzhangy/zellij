@@ -69,7 +69,7 @@ final class SettingsStore: ObservableObject {
               let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) else {
             return .empty
         }
-        return decoded
+        return decoded.mergingDefaultSnippets()
     }
 
     private func scheduleSave() {

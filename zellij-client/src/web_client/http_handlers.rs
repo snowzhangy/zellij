@@ -149,10 +149,8 @@ pub async fn create_new_client(
     }))
 }
 
-pub async fn list_sessions_handler() -> Result<
-    Json<SessionListResponse>,
-    (StatusCode, Json<String>),
-> {
+pub async fn list_sessions_handler() -> Result<Json<SessionListResponse>, (StatusCode, Json<String>)>
+{
     match get_sessions() {
         Ok(sessions) => {
             let mut session_items: Vec<SessionListItem> = sessions

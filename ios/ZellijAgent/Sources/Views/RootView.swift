@@ -116,6 +116,7 @@ private struct TerminalSurface: View {
             fontSize: model.settingsStore.settings.fontSize,
             isReadOnly: model.activeSession?.isReadOnly == true,
             optionAsMetaKey: model.optionAsMetaKey,
+            touchMode: model.selectedProfile?.touchMode ?? .scroll,
             onInput: { data in
                 model.sendData(data)
             },

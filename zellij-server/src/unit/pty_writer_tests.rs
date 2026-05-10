@@ -28,22 +28,38 @@ enum WriteBehavior {
 }
 
 #[derive(Clone)]
+enum ResizeBehavior {
+    Accept,
+    FailTimes(usize),
+}
+
+#[derive(Clone)]
 struct MockServerOsApi {
     /// Controls how each terminal behaves on write.
     write_behavior: Arc<Mutex<HashMap<u32, WriteBehavior>>>,
+    resize_behavior: Arc<Mutex<HashMap<u32, ResizeBehavior>>>,
     /// Log of (terminal_id, bytes) for each successful write.
     write_log: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
+    resize_log: Arc<Mutex<Vec<(u32, u16, u16)>>>,
 }
 
 impl MockServerOsApi {
     fn new() -> Self {
         MockServerOsApi {
             write_behavior: Arc::new(Mutex::new(HashMap::new())),
+            resize_behavior: Arc::new(Mutex::new(HashMap::new())),
             write_log: Arc::new(Mutex::new(Vec::new())),
+            resize_log: Arc::new(Mutex::new(Vec::new())),
         }
     }
     fn set_behavior(&self, terminal_id: u32, behavior: WriteBehavior) {
         self.write_behavior
+            .lock()
+            .unwrap()
+            .insert(terminal_id, behavior);
+    }
+    fn set_resize_behavior(&self, terminal_id: u32, behavior: ResizeBehavior) {
+        self.resize_behavior
             .lock()
             .unwrap()
             .insert(terminal_id, behavior);
@@ -57,17 +73,40 @@ impl MockServerOsApi {
             .flat_map(|(_, bytes)| bytes.clone())
             .collect()
     }
+    fn get_resizes(&self, terminal_id: u32) -> Vec<(u16, u16)> {
+        self.resize_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(tid, _, _)| *tid == terminal_id)
+            .map(|(_, cols, rows)| (*cols, *rows))
+            .collect()
+    }
 }
 
 impl ServerOsApi for MockServerOsApi {
     fn set_terminal_size_using_terminal_id(
         &self,
-        _id: u32,
-        _cols: u16,
-        _rows: u16,
+        id: u32,
+        cols: u16,
+        rows: u16,
         _width_in_pixels: Option<u16>,
         _height_in_pixels: Option<u16>,
     ) -> Result<()> {
+        let mut resize_behavior = self.resize_behavior.lock().unwrap();
+        match resize_behavior.get_mut(&id) {
+            Some(ResizeBehavior::FailTimes(remaining)) if *remaining > 0 => {
+                *remaining -= 1;
+                return Err(anyhow::anyhow!(
+                    "simulated resize failure for terminal {id}"
+                ));
+            },
+            Some(ResizeBehavior::FailTimes(_)) => {
+                resize_behavior.insert(id, ResizeBehavior::Accept);
+            },
+            _ => {},
+        }
+        self.resize_log.lock().unwrap().push((id, cols, rows));
         Ok(())
     }
     fn spawn_terminal(
@@ -293,6 +332,26 @@ fn writes_to_same_terminal_preserve_order() {
     assert_eq!(
         written, b"AAAABBBBCCCC",
         "writes must be delivered in order"
+    );
+}
+
+#[test]
+fn resize_is_retried_when_terminal_fd_is_not_ready_yet() {
+    let mock = MockServerOsApi::new();
+    mock.set_resize_behavior(1, ResizeBehavior::FailTimes(1));
+    let mock_clone = mock.clone();
+
+    let (bus, sender) = make_test_bus(mock);
+    run_pty_writer(
+        bus,
+        sender,
+        vec![PtyWriteInstruction::ResizePty(1, 120, 36, None, None)],
+    );
+
+    assert_eq!(
+        mock_clone.get_resizes(1),
+        vec![(120, 36)],
+        "the last resize should be applied after the transient fd lookup failure"
     );
 }
 
