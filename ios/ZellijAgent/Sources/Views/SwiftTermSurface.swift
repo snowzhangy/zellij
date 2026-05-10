@@ -139,7 +139,7 @@ struct SwiftTermSurface: UIViewRepresentable {
                 touchMode: touchMode,
                 isReadOnly: isReadOnly
             )
-            let tap = UITapGestureRecognizer(target: handler, action: #selector(TabClickHandler.handleTap(_:)))
+            let tap = StateCapturingTapGesture(target: handler, action: #selector(TabClickHandler.handleTap(_:)))
             tap.numberOfTapsRequired = 1
             tap.numberOfTouchesRequired = 1
             tap.cancelsTouchesInView = false
@@ -453,6 +453,12 @@ struct SwiftTermSurface: UIViewRepresentable {
                 return
             }
             sendSGRMouseClick(column: cell.column, row: cell.row, via: terminalView)
+            if let recognizer = recognizer as? StateCapturingTapGesture,
+               !recognizer.firstResponderAtTouchStart {
+                DispatchQueue.main.async {
+                    _ = terminalView.resignFirstResponder()
+                }
+            }
         }
 
         private func terminalCell(at point: CGPoint, in view: TerminalView) -> (column: Int, row: Int)? {
@@ -485,6 +491,15 @@ struct SwiftTermSurface: UIViewRepresentable {
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
             true
+        }
+    }
+
+    final class StateCapturingTapGesture: UITapGestureRecognizer {
+        private(set) var firstResponderAtTouchStart = false
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            firstResponderAtTouchStart = view?.isFirstResponder ?? false
+            super.touchesBegan(touches, with: event)
         }
     }
 
