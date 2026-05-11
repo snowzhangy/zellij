@@ -18,7 +18,7 @@ use crate::web_client::control_message::{
 };
 use crate::web_client::ClientOsApiFactory;
 use zellij_utils::{
-    data::Palette,
+    data::{ConnectToSession, Palette},
     errors::ErrorContext,
     ipc::{ClientToServerMsg, ServerToClientMsg},
     pane_size::Size,
@@ -60,6 +60,27 @@ mod web_client_tests {
             "HTTP server failed to start on port {} within {:?}",
             port, timeout
         ))
+    }
+
+    async fn wait_for_recorded_attach_messages(
+        session_manager: &MockSessionManager,
+        expected_count: usize,
+        timeout_duration: Duration,
+    ) -> Vec<(String, ClientToServerMsg)> {
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            let messages = session_manager.first_messages_sent.lock().unwrap().clone();
+            if messages.len() >= expected_count {
+                return messages;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Expected at least {} attach messages, got {}",
+                expected_count,
+                messages.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
@@ -459,6 +480,293 @@ mod web_client_tests {
         server_handle.abort();
 
         revoke_token(test_token_name).expect("Failed to revoke test token");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_websocket_smoke_attach_and_switch_session() {
+        let _ = delete_db();
+
+        let (auth_token, _) = create_token(Some("smoke_attach".to_string()), false)
+            .expect("Failed to create test token");
+
+        let mut mock_session_manager = MockSessionManager::with_all_sessions_existing();
+        mock_session_manager
+            .mock_sessions
+            .insert("alpha".to_string(), true);
+        mock_session_manager
+            .mock_sessions
+            .insert("beta".to_string(), true);
+        let mock_session_manager = Arc::new(mock_session_manager);
+
+        let mock_os_api_factory = Arc::new(MockClientOsApiFactory::new());
+        let factory_for_verification = mock_os_api_factory.clone();
+
+        let config = Config::default();
+        let options = Options::default();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let ip = addr.ip();
+
+        let temp_config_path = std::env::temp_dir().join("test_config.kdl");
+        let mock_session_manager_for_server = mock_session_manager.clone();
+        let server_handle = tokio::spawn(async move {
+            serve_web_client(
+                config,
+                options,
+                Some(temp_config_path),
+                listener,
+                None,
+                Some(mock_session_manager_for_server),
+                Some(mock_os_api_factory),
+                ip,
+                port,
+            )
+            .await;
+        });
+
+        wait_for_server(port, Duration::from_secs(5))
+            .await
+            .expect("Server failed to start");
+
+        let session_token = login_and_get_session_token(port, &auth_token).await;
+
+        let session_url = format!("http://127.0.0.1:{}/session", port);
+        let mut alpha_response = timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking({
+                let session_token = session_token.clone();
+                move || {
+                    isahc::Request::post(&session_url)
+                        .header("Cookie", format!("session_token={}", session_token))
+                        .header("Content-Type", "application/json")
+                        .body(r#"{"session_name":"alpha"}"#)
+                        .unwrap()
+                        .send()
+                }
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(alpha_response.status().is_success());
+
+        let alpha_client_data: serde_json::Value =
+            serde_json::from_str(&alpha_response.text().unwrap()).unwrap();
+        let alpha_web_client_id = alpha_client_data["web_client_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let control_ws_url = format!("ws://127.0.0.1:{}/ws/control", port);
+        let (control_ws, _) = timeout(
+            Duration::from_secs(5),
+            connect_async_with_cookie(&control_ws_url, &session_token),
+        )
+        .await
+        .expect("Control websocket connection timed out")
+        .expect("Failed to connect control websocket");
+        let (mut control_sink, mut control_stream) = control_ws.split();
+
+        let initial_control = timeout(Duration::from_secs(2), control_stream.next())
+            .await
+            .expect("Timed out waiting for initial control message")
+            .expect("Control stream ended unexpectedly")
+            .expect("Control websocket error");
+        match initial_control {
+            Message::Text(text) => {
+                let parsed: WebServerToWebClientControlMessage =
+                    serde_json::from_str(&text).expect("Failed to parse initial control message");
+                assert!(
+                    matches!(parsed, WebServerToWebClientControlMessage::SetConfig(..)),
+                    "Expected SetConfig, got {:?}",
+                    parsed
+                );
+            },
+            other => panic!("Expected initial text control message, got {:?}", other),
+        }
+
+        let resize_msg = WebClientToWebServerControlMessage {
+            web_client_id: alpha_web_client_id.clone(),
+            payload: WebClientToWebServerControlMessagePayload::TerminalResize(Size {
+                rows: 24,
+                cols: 80,
+            }),
+        };
+        control_sink
+            .send(Message::Text(serde_json::to_string(&resize_msg).unwrap()))
+            .await
+            .expect("Failed to send initial resize");
+
+        let terminal_ws_url = format!(
+            "ws://127.0.0.1:{}/ws/terminal/alpha?web_client_id={}",
+            port, alpha_web_client_id
+        );
+        let (terminal_ws, _) = timeout(
+            Duration::from_secs(5),
+            connect_async_with_cookie(&terminal_ws_url, &session_token),
+        )
+        .await
+        .expect("Terminal websocket connection timed out")
+        .expect("Failed to connect terminal websocket");
+        let (_terminal_sink, terminal_stream) = terminal_ws.split();
+
+        let all_messages =
+            wait_for_recorded_attach_messages(&mock_session_manager, 1, Duration::from_secs(4))
+                .await;
+        assert_eq!(all_messages[0].0, "alpha");
+        assert!(
+            matches!(all_messages[0].1, ClientToServerMsg::AttachClient { .. }),
+            "Expected AttachClient for alpha, got {:?}",
+            all_messages[0].1
+        );
+
+        {
+            let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
+            let mock_api = mock_apis
+                .values()
+                .next()
+                .expect("Expected a mock API for the connected client");
+            mock_api.queue_server_message(ServerToClientMsg::SwitchSession {
+                connect_to_session: ConnectToSession {
+                    name: Some("beta".to_string()),
+                    tab_position: None,
+                    pane_id: None,
+                    layout: None,
+                    cwd: None,
+                },
+            });
+        }
+
+        let mut saw_switched_session = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while tokio::time::Instant::now() < deadline {
+            match timeout(Duration::from_millis(500), control_stream.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let parsed: WebServerToWebClientControlMessage =
+                        serde_json::from_str(&text).expect("Failed to parse control message");
+                    if let WebServerToWebClientControlMessage::SwitchedSession {
+                        new_session_name,
+                    } = parsed
+                    {
+                        if new_session_name == "beta" {
+                            saw_switched_session = true;
+                            break;
+                        }
+                    }
+                },
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            saw_switched_session,
+            "Expected session switch control message for beta"
+        );
+
+        let all_messages =
+            wait_for_recorded_attach_messages(&mock_session_manager, 2, Duration::from_secs(4))
+                .await;
+        assert_eq!(all_messages[1].0, "beta");
+        assert!(
+            matches!(all_messages[1].1, ClientToServerMsg::AttachClient { .. }),
+            "Expected AttachClient for beta, got {:?}",
+            all_messages[1].1
+        );
+
+        let _ = control_sink.close().await;
+        drop(terminal_stream);
+        server_handle.abort();
+        revoke_token("smoke_attach").expect("Failed to revoke test token");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_image_upload_saves_file_and_returns_path() {
+        let _ = delete_db();
+
+        let upload_dir = tempfile::TempDir::new().expect("Failed to create upload dir");
+        std::env::set_var("ZELLIJ_UPLOAD_DIR", upload_dir.path());
+
+        let (auth_token, _) = create_token(Some("image_upload".to_string()), false)
+            .expect("Failed to create test token");
+
+        let session_manager = Arc::new(MockSessionManager::with_all_sessions_existing());
+        let client_os_api_factory = Arc::new(MockClientOsApiFactory::new());
+        let config = Config::default();
+        let options = Options::default();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+
+        let temp_config_path = std::env::temp_dir().join("test_config.kdl");
+        let server_handle = tokio::spawn(async move {
+            serve_web_client(
+                config,
+                options,
+                Some(temp_config_path),
+                listener,
+                None,
+                Some(session_manager),
+                Some(client_os_api_factory),
+                addr.ip(),
+                port,
+            )
+            .await;
+        });
+
+        wait_for_server(port, Duration::from_secs(5))
+            .await
+            .expect("Server failed to start");
+
+        let session_token = login_and_get_session_token(port, &auth_token).await;
+        let upload_url = format!("http://127.0.0.1:{}/upload/image", port);
+        let image_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10];
+
+        let mut response = timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking({
+                let session_token = session_token.clone();
+                let image_bytes = image_bytes.clone();
+                move || {
+                    isahc::Request::post(&upload_url)
+                        .header("Cookie", format!("session_token={}", session_token))
+                        .header("Content-Type", "image/png")
+                        .header("X-Zellij-Filename", "../bad/path.png")
+                        .body(image_bytes)
+                        .unwrap()
+                        .send()
+                }
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+        assert!(response.status().is_success());
+        let upload_response: serde_json::Value =
+            serde_json::from_str(&response.text().unwrap()).unwrap();
+        let path = std::path::PathBuf::from(upload_response["path"].as_str().unwrap());
+        assert!(path.starts_with(upload_dir.path()));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("zellij-upload-"));
+        assert_eq!(std::fs::read(path).unwrap(), image_bytes);
+        assert_eq!(upload_response["bytes"], 8);
+
+        server_handle.abort();
+        revoke_token("image_upload").expect("Failed to revoke test token");
+        std::env::remove_var("ZELLIJ_UPLOAD_DIR");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 

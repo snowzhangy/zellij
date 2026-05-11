@@ -282,6 +282,8 @@ fn handle_exit_reason(client_connection_bus: &mut ClientConnectionBus, exit_reas
             client_connection_bus.send_stdout(format!(
                 "\u{1b}[2J\n Web Clients are not allowed to attach to this session."
             ));
+            client_connection_bus.close_connection_web_clients_forbidden();
+            return;
         },
         ExitReason::Error(e) => {
             let goto_start_of_last_line = format!("\u{1b}[{};{}H", 1, 1);

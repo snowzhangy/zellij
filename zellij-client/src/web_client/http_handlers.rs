@@ -1,10 +1,11 @@
 use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
 use crate::web_client::types::{
-    AppState, CreateClientIdResponse, LoginRequest, LoginResponse, SessionListItem,
-    SessionListResponse, SessionStatus,
+    AppState, CreateClientIdResponse, ImageUploadResponse, LoginRequest, LoginResponse,
+    SessionListItem, SessionListResponse, SessionStatus,
 };
 use crate::web_client::utils::{get_mime_type, parse_cookies};
 use axum::{
+    body::{to_bytes, Bytes},
     extract::{Path as AxumPath, Request, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse},
@@ -12,6 +13,10 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use include_dir;
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 use zellij_utils::{
     consts::VERSION,
@@ -34,6 +39,7 @@ const WEB_CLIENT_PAGE: &str = include_str!(concat!(
 ));
 
 const ASSETS_DIR: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets");
+const MAX_IMAGE_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
 pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html<String> {
     let cookies = parse_cookies(&request);
@@ -178,6 +184,140 @@ pub async fn list_sessions_handler() -> Result<Json<SessionListResponse>, (Statu
             Json("Failed to list sessions".to_string()),
         )),
     }
+}
+
+pub async fn upload_image_handler(
+    request: axum::extract::Request,
+) -> Result<Json<ImageUploadResponse>, (StatusCode, Json<String>)> {
+    let is_read_only = request
+        .extensions()
+        .get::<IsReadOnly>()
+        .copied()
+        .unwrap_or(IsReadOnly(true))
+        .0;
+    if is_read_only {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json("Read-only tokens cannot upload images".to_string()),
+        ));
+    }
+
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    if !content_type.starts_with("image/") {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json("Only image uploads are supported".to_string()),
+        ));
+    }
+
+    let original_filename = request
+        .headers()
+        .get("x-zellij-filename")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image")
+        .to_string();
+    let body = to_bytes(request.into_body(), MAX_IMAGE_UPLOAD_BYTES)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json("Image upload is too large".to_string()),
+            )
+        })?;
+    if body.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json("Image upload is empty".to_string()),
+        ));
+    }
+
+    let upload_dir = image_upload_dir();
+    tokio::fs::create_dir_all(&upload_dir).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to create upload directory: {}", e)),
+        )
+    })?;
+
+    let filename = upload_filename(&original_filename, &content_type);
+    let path = upload_dir.join(filename);
+    write_upload_atomically(&path, &body).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to save image upload: {}", e)),
+        )
+    })?;
+
+    Ok(Json(ImageUploadResponse {
+        path: path.to_string_lossy().to_string(),
+        bytes: body.len(),
+    }))
+}
+
+fn image_upload_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("ZELLIJ_UPLOAD_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join("Downloads")
+            .join("ZellijUploads");
+    }
+    std::env::temp_dir().join("ZellijUploads")
+}
+
+fn upload_filename(original_filename: &str, content_type: &str) -> String {
+    let extension = Path::new(original_filename)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(sanitize_extension)
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or_else(|| extension_for_content_type(content_type).to_string());
+    let created_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!(
+        "zellij-upload-{}-{}.{}",
+        created_at_ms,
+        Uuid::new_v4().simple(),
+        extension
+    )
+}
+
+fn sanitize_extension(extension: &str) -> String {
+    extension
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn extension_for_content_type(content_type: &str) -> &'static str {
+    match content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+    {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/heic" | "image/heif" => "heic",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+async fn write_upload_atomically(path: &Path, body: &Bytes) -> std::io::Result<()> {
+    let tmp_path = path.with_extension("uploading");
+    tokio::fs::write(&tmp_path, body).await?;
+    tokio::fs::rename(tmp_path, path).await
 }
 
 pub async fn get_static_asset(AxumPath(path): AxumPath<String>) -> impl IntoResponse {

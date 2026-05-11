@@ -185,6 +185,12 @@ pub struct SessionListItem {
 }
 
 #[derive(Serialize)]
+pub struct ImageUploadResponse {
+    pub path: String,
+    pub bytes: usize,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Live,

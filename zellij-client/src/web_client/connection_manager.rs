@@ -183,6 +183,21 @@ impl ClientConnectionBus {
         self.close_connection();
     }
 
+    pub fn close_connection_web_clients_forbidden(&mut self) {
+        if let Some(flag) = self
+            .connection_table
+            .lock()
+            .unwrap()
+            .get_should_not_reconnect_flag(&self.web_client_id)
+        {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.close_connection_with_reason(
+            4405,
+            "Web clients are not allowed to attach to this session",
+        );
+    }
+
     fn get_control_channel_tx(&mut self) {
         if let Some(control_channel_tx) = self
             .connection_table
