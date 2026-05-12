@@ -2152,11 +2152,9 @@ pub(crate) fn route_thread_main(
     let mut retry_queue = VecDeque::new();
     let err_context = || format!("failed to handle instruction for client {client_id}");
     let mut seen_cli_pipes = HashSet::new();
-    let mut consecutive_unknown_messages_received = 0;
     'route_loop: loop {
         match receiver.recv_client_msg() {
             Some((instruction, err_ctx)) => {
-                consecutive_unknown_messages_received = 0;
                 err_ctx.update_thread_ctx();
                 let mut handle_instruction = |instruction: ClientToServerMsg,
                                               mut retry_queue: Option<
@@ -2532,7 +2530,12 @@ pub(crate) fn route_thread_main(
                                 .with_context(err_context)?;
                         },
                         ClientToServerMsg::ConnStatus => {
-                            let _ = to_server.send(ServerInstruction::ConnStatus(client_id));
+                            // Keep session discovery independent from the main server loop.
+                            // A busy session can still have a live listener thread; answering
+                            // here prevents `zellij ls` / attach probes from blocking behind
+                            // regular server work or incorrectly marking the session as exited.
+                            let _ =
+                                os_input.send_to_client(client_id, ServerToClientMsg::Connected);
                             should_break = true;
                         },
                         ClientToServerMsg::DetachSession { client_ids } => {
@@ -2627,21 +2630,11 @@ pub(crate) fn route_thread_main(
                 }
             },
             None => {
-                consecutive_unknown_messages_received += 1;
-                if consecutive_unknown_messages_received == 1 {
-                    log::error!("Received unknown message from client.");
-                }
-                if consecutive_unknown_messages_received >= 1000 {
-                    log::error!("Client sent over 1000 consecutive unknown messages, this is probably an infinite loop, logging client out");
-                    let _ = os_input.send_to_client(
-                        client_id,
-                        ServerToClientMsg::Exit {
-                            exit_reason: ExitReason::Error("Received empty message".to_string()),
-                        },
-                    );
-                    let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
-                    break 'route_loop;
-                }
+                log::warn!(
+                    "Client route for client id {} received no decodable message; removing client",
+                    client_id
+                );
+                break 'route_loop;
             },
         }
 

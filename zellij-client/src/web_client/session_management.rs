@@ -63,6 +63,7 @@ pub fn create_first_message(
     should_create_session: bool,
     session_name: &str,
     initial_layout: Option<LayoutInfo>,
+    tab_position_to_focus: Option<usize>,
 ) -> ClientToServerMsg {
     let resurrection_layout = resurrection_layout(&session_name).ok().flatten();
 
@@ -126,7 +127,7 @@ pub fn create_first_message(
 
         ClientToServerMsg::AttachClient {
             cli_assets,
-            tab_position_to_focus: None,
+            tab_position_to_focus,
             pane_to_focus: None,
             is_web_client,
         }

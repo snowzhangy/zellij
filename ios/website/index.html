@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zelmux - Mobile Zellij Client</title>
+  <meta name="description" content="Zelmux is a lightweight iPhone and iPad client for connecting to your own Zellij web server.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="index.html" aria-label="Zelmux home">
+      <img src="assets/zelmux-icon.png" alt="" width="40" height="40">
+      <span>Zelmux</span>
+    </a>
+    <nav>
+      <a href="privacy.html">Privacy</a>
+      <a href="support.html">Support</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Zellij on iPhone and iPad</p>
+        <h1>Remote terminal access for your Zellij sessions.</h1>
+        <p class="lead">Zelmux connects to your own Zellij web server so you can monitor agents, switch sessions, paste prompts, and keep work moving from a mobile device.</p>
+        <div class="actions">
+          <a class="button" href="support.html">Setup Guide</a>
+          <a class="button secondary" href="privacy.html">Privacy Policy</a>
+        </div>
+      </div>
+      <div class="terminal-card" aria-label="Zelmux terminal preview">
+        <div class="terminal-top">
+          <span class="dot red"></span>
+          <span class="dot yellow"></span>
+          <span class="dot green"></span>
+          <span class="terminal-title">Mac · zellij</span>
+        </div>
+        <pre><code>Zellij (work)  Tab #1
+
+› summarize recent commits
+
+• Connected to your Mac
+• Session list and quick attach
+• Gesture shortcuts for mobile use
+
+Connected 0.45.0</code></pre>
+      </div>
+    </section>
+
+    <section class="features">
+      <article>
+        <h2>Built for agent sessions</h2>
+        <p>Quick access to slash commands, prompt composition, session switching, and terminal controls that are hard to type on a phone.</p>
+      </article>
+      <article>
+        <h2>Your server, your data</h2>
+        <p>Zelmux connects only to the Zellij server URL you configure. Tokens stay in the iOS Keychain and are not sent to the app developer.</p>
+      </article>
+      <article>
+        <h2>Lightweight terminal UI</h2>
+        <p>Focus mode, scroll gestures, font controls, and iPad support keep the terminal usable on small and large screens.</p>
+      </article>
+    </section>
+
+    <section class="requirements">
+      <h2>Requirements</h2>
+      <ul>
+        <li>A Mac or server running Zellij with the web client enabled.</li>
+        <li>A Zellij web authentication token created on your server.</li>
+        <li>Network access from your iPhone or iPad to that server.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <span>© 2026 Zelmux</span>
+    <a href="privacy.html">Privacy</a>
+    <a href="support.html">Support</a>
+  </footer>
+</body>
+</html>

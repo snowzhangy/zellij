@@ -30,6 +30,7 @@ pub fn zellij_server_listener(
     session_manager: Arc<dyn SessionManager>,
     attachment_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
     allow_create: bool,
+    tab_position_to_focus: Option<usize>,
 ) {
     let _server_listener_thread = std::thread::Builder::new()
         .name("server_listener".to_string())
@@ -123,7 +124,16 @@ pub fn zellij_server_listener(
                     }
 
                     let should_create_new_session = !session_exists;
-                    let first_message = create_first_message(is_read_only, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
+                    let first_message = create_first_message(
+                        is_read_only,
+                        config_file_path.clone(),
+                        client_attributes.clone(),
+                        config_options.clone(),
+                        should_create_new_session,
+                        &session_name,
+                        initial_layout,
+                        tab_position_to_focus,
+                    );
                     let zellij_ipc_pipe = create_ipc_pipe(&session_name);
 
                     session_manager.spawn_session_if_needed(

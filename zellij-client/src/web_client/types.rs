@@ -201,6 +201,7 @@ pub enum SessionStatus {
 pub struct TerminalParams {
     pub web_client_id: String,
     pub create: Option<bool>,
+    pub tab_position_to_focus: Option<usize>,
 }
 
 #[derive(Deserialize)]

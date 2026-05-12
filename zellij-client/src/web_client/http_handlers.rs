@@ -264,9 +264,7 @@ fn image_upload_dir() -> PathBuf {
         return PathBuf::from(path);
     }
     if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home)
-            .join("Downloads")
-            .join("ZellijUploads");
+        return PathBuf::from(home).join("Downloads").join("ZellijUploads");
     }
     std::env::temp_dir().join("ZellijUploads")
 }

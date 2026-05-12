@@ -1,46 +1,52 @@
-name: ZellijAgent
+name: Zelmux
 options:
-  bundleIdPrefix: dev.zellij
+  bundleIdPrefix: com.cinetec.dev
   deploymentTarget:
     iOS: "16.0"
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "2"
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG ZELMUX_DIAGNOSTICS"
+    Release:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "ZELMUX_RELEASE"
 packages:
   SwiftTerm:
-    url: https://github.com/migueldeicaza/SwiftTerm
-    from: 1.13.0
+    path: ThirdParty/SwiftTerm
 targets:
-  ZellijAgent:
+  Zelmux:
     type: application
     platform: iOS
     deploymentTarget: "16.0"
     sources:
-      - ZellijAgent/Sources
+      - Zelmux/Sources
     dependencies:
       - package: SwiftTerm
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.cinetec.dev.zellij.agentios
-        INFOPLIST_FILE: ZellijAgent/Sources/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.cinetec.dev.zelmux
+        INFOPLIST_FILE: Zelmux/Sources/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: E3LHDHQKAV
-  ZellijAgentTests:
+        TARGETED_DEVICE_FAMILY: "1,2"
+  ZelmuxTests:
     type: bundle.unit-test
     platform: iOS
     deploymentTarget: "16.0"
     sources:
-      - ZellijAgentTests
+      - ZelmuxTests
     dependencies:
       - package: SwiftTerm
-      - target: ZellijAgent
+      - target: Zelmux
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.zellij.agentios.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.cinetec.dev.zelmux.tests
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: E3LHDHQKAV
+        TARGETED_DEVICE_FAMILY: "1,2"

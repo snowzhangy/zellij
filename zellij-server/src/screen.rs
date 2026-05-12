@@ -1379,6 +1379,7 @@ pub(crate) struct Screen {
     /// Per-regular-client viewport sizes, used to compute per-tab sizing.
     client_sizes: HashMap<ClientId, Size>,
     global_last_active_tab_id: usize,
+    last_web_client_active_tab_id: Option<usize>,
     tab_history: BTreeMap<ClientId, Vec<usize>>,
     pane_history: BTreeMap<ClientId, Vec<PaneId>>,
     mode_info: BTreeMap<ClientId, ModeInfo>,
@@ -1566,6 +1567,7 @@ impl Screen {
             active_tab_ids: BTreeMap::new(),
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
+            last_web_client_active_tab_id: None,
             tabs: BTreeMap::new(),
             terminal_emulator_colors: Rc::new(RefCell::new(Palette::default())),
             terminal_emulator_color_codes: Rc::new(RefCell::new(HashMap::new())),
@@ -3109,7 +3111,13 @@ impl Screen {
             tab_history = first_tab_history.clone();
         }
 
-        let tab_index = if let Some((_first_client, first_active_tab_index)) =
+        let tab_index = if is_web_client
+            && self
+                .last_web_client_active_tab_id
+                .is_some_and(|tab_id| self.tabs.contains_key(&tab_id))
+        {
+            self.last_web_client_active_tab_id.unwrap_or(0)
+        } else if let Some((_first_client, first_active_tab_index)) =
             self.active_tab_ids.iter().next()
         {
             *first_active_tab_index
@@ -3169,6 +3177,15 @@ impl Screen {
         let previously_active_tab_id = self.active_tab_ids.get(&client_id).copied();
         if let Some(prev_tab_id) = previously_active_tab_id {
             self.global_last_active_tab_id = prev_tab_id;
+            if self
+                .connected_clients
+                .borrow()
+                .get(&client_id)
+                .copied()
+                .unwrap_or(false)
+            {
+                self.last_web_client_active_tab_id = Some(prev_tab_id);
+            }
             self.active_tab_ids.remove(&client_id);
         }
         if self.tab_history.contains_key(&client_id) {

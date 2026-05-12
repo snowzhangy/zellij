@@ -186,6 +186,7 @@ async fn handle_ws_terminal(
         state.session_manager.clone(),
         Some(attachment_complete_tx),
         params.create.unwrap_or(false),
+        params.tab_position_to_focus,
     );
 
     let terminal_channel_cancellation_token = CancellationToken::new();
