@@ -108,6 +108,48 @@ final class ZellijWireCodecTests: XCTestCase {
         XCTAssertEqual(cleaned, "actual agent output\nprompt text")
     }
 
+    func testLastReplyIgnoresTrailingPromptAndAgentChrome() {
+        let lines = [
+            "Earlier unrelated answer",
+            "❯ previous prompt",
+            "Item: PhotoPicker HEIC",
+            "(PromptComposerView:230)",
+            "Current: Raw Data upload, HEIC passes",
+            "through",
+            "Patch: UIImage.pngData() convert",
+            "────────────────────────────────────────",
+            "Functional but:",
+            "- Spaces in home break agent path parse.",
+            "- HEIC from PhotoPicker breaks most agent",
+            "CLIs (can't decode).",
+            "Apply patches if you want release polish.",
+            "Want me to land them?",
+            "✻ Brewed for 10s",
+            "───────────────────────────────────────────",
+            "❯",
+            "───────────────────────────────────────────",
+            "[CAVEMAN] ok. this is the content of copy last reply."
+        ]
+
+        let reply = TerminalSelectionCleaner.lastReplyText(fromCleanedLines: lines)
+        XCTAssertEqual(
+            reply,
+            """
+            Item: PhotoPicker HEIC
+            (PromptComposerView:230)
+            Current: Raw Data upload, HEIC passes
+            through
+            Patch: UIImage.pngData() convert
+            Functional but:
+            - Spaces in home break agent path parse.
+            - HEIC from PhotoPicker breaks most agent
+            CLIs (can't decode).
+            Apply patches if you want release polish.
+            Want me to land them?
+            """
+        )
+    }
+
     @MainActor
     func testTerminalStreamCoalescesChunksInOrder() {
         let stream = TerminalStream()

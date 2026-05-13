@@ -15,7 +15,7 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use include_dir;
 use std::{
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use zellij_utils::{
@@ -243,6 +243,7 @@ pub async fn upload_image_handler(
             Json(format!("Failed to create upload directory: {}", e)),
         )
     })?;
+    prune_old_uploads(&upload_dir).await;
 
     let filename = upload_filename(&original_filename, &content_type);
     let path = upload_dir.join(filename);
@@ -263,10 +264,16 @@ fn image_upload_dir() -> PathBuf {
     if let Ok(path) = std::env::var("ZELLIJ_UPLOAD_DIR") {
         return PathBuf::from(path);
     }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join("Downloads").join("ZellijUploads");
+    if let Ok(path) = std::env::var("XDG_CACHE_HOME") {
+        return PathBuf::from(path).join("zellij").join("uploads");
     }
-    std::env::temp_dir().join("ZellijUploads")
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".cache")
+            .join("zellij")
+            .join("uploads");
+    }
+    std::env::temp_dir().join("zellij").join("uploads")
 }
 
 fn upload_filename(original_filename: &str, content_type: &str) -> String {
@@ -316,6 +323,39 @@ async fn write_upload_atomically(path: &Path, body: &Bytes) -> std::io::Result<(
     let tmp_path = path.with_extension("uploading");
     tokio::fs::write(&tmp_path, body).await?;
     tokio::fs::rename(tmp_path, path).await
+}
+
+async fn prune_old_uploads(upload_dir: &Path) {
+    const UPLOAD_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+    let Ok(mut entries) = tokio::fs::read_dir(upload_dir).await else {
+        return;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let filename = entry.file_name();
+        let filename = filename.to_string_lossy();
+        if !filename.starts_with("zellij-upload-") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(modified) = modified.duration_since(UNIX_EPOCH) else {
+            continue;
+        };
+        if now.saturating_sub(modified) > UPLOAD_RETENTION {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
 }
 
 pub async fn get_static_asset(AxumPath(path): AxumPath<String>) -> impl IntoResponse {

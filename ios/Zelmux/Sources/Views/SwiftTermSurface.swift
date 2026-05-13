@@ -36,6 +36,7 @@ struct SwiftTermSurface: UIViewRepresentable {
             )
         ]
         view.terminalDelegate = context.coordinator
+        context.coordinator.terminalView = view
         view.nativeBackgroundColor = .black
         view.nativeForegroundColor = .systemGreen
         view.caretColor = .systemGreen
@@ -112,11 +113,13 @@ struct SwiftTermSurface: UIViewRepresentable {
 
     final class Coordinator: NSObject, TerminalViewDelegate {
         var lastRevision = 0
+        weak var terminalView: TerminalView?
         private var fingerScrollHandler: FingerScrollHandler?
         private var keyboardToggleHandler: KeyboardToggleHandler?
         private var shortcutHandler: ShortcutGestureHandler?
         private var pinchZoomHandler: PinchZoomHandler?
         private let accessoryCustomizer = AgentKeyboardAccessoryCustomizer()
+        private var memoryPressureObserver: NSObjectProtocol?
         let onInput: (Data) -> Void
         let onResize: (Int, Int) -> Void
         let onFontSizeChange: (Double) -> Void
@@ -132,6 +135,22 @@ struct SwiftTermSurface: UIViewRepresentable {
             self.onResize = onResize
             self.onFontSizeChange = onFontSizeChange
             self.onBell = onBell
+            super.init()
+            memoryPressureObserver = NotificationCenter.default.addObserver(
+                forName: .zelmuxMemoryPressure,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                // iOS pre-OOM signal. Drop scrollback to free ~3MB so the
+                // process survives. Stays shrunk for the lifetime of this view.
+                self?.terminalView?.getTerminal().changeScrollback(2_000)
+            }
+        }
+
+        deinit {
+            if let observer = memoryPressureObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
         }
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
@@ -170,7 +189,6 @@ struct SwiftTermSurface: UIViewRepresentable {
                 return
             }
             let handler = FingerScrollHandler(terminalView: view)
-            handler.touchMode = touchMode
             let gesture = UIPanGestureRecognizer(target: handler, action: #selector(FingerScrollHandler.handlePan(_:)))
             gesture.minimumNumberOfTouches = 1
             gesture.maximumNumberOfTouches = 1
@@ -178,7 +196,7 @@ struct SwiftTermSurface: UIViewRepresentable {
             gesture.delegate = handler
             view.addGestureRecognizer(gesture)
             handler.gesture = gesture
-            gesture.isEnabled = touchMode == .scroll
+            handler.touchMode = touchMode
             fingerScrollHandler = handler
         }
 
@@ -350,7 +368,6 @@ struct SwiftTermSurface: UIViewRepresentable {
         ) -> Bool {
             true
         }
-
     }
 
     final class FingerScrollHandler: NSObject, UIGestureRecognizerDelegate {
@@ -506,6 +523,20 @@ struct SwiftTermSurface: UIViewRepresentable {
             true
         }
 
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            // Yield to SwiftTerm's word/line selection. Long-press auto-fails
+            // on pan movement, so no explicit dependency needed there — adding
+            // it would delay every scroll start by the long-press timeout.
+            if let tap = otherGestureRecognizer as? UITapGestureRecognizer,
+               tap.numberOfTapsRequired >= 2 {
+                return true
+            }
+            return false
+        }
+
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             guard let terminalView else { return false }
             // Let SwiftTerm own selection gestures end-to-end. Its internal
@@ -521,6 +552,7 @@ struct SwiftTermSurface: UIViewRepresentable {
     final class ShortcutGestureHandler: NSObject, UIGestureRecognizerDelegate {
         weak var terminalView: TerminalView?
         var isReadOnly: Bool
+        private let haptic = UIImpactFeedbackGenerator(style: .light)
 
         init(terminalView: TerminalView, isReadOnly: Bool) {
             self.terminalView = terminalView
@@ -554,6 +586,7 @@ struct SwiftTermSurface: UIViewRepresentable {
 
         private func send(_ bytes: [UInt8]) {
             terminalView?.send(bytes)
+            haptic.impactOccurred()
         }
 
         func gestureRecognizer(
@@ -708,25 +741,33 @@ final class ZelmuxTerminalView: TerminalView {
     private let transcriptSnapshotInterval: TimeInterval = 0.25
 
     @objc func copyLastReply(_ sender: Any?) {
-        recordRenderedSnapshot(force: true)
         guard let text = currentLastReplyText() else { return }
+        recordRenderedSnapshot(force: true)
         UIPasteboard.general.string = text
         UIMenuController.shared.hideMenu()
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(copyLastReply(_:)) {
-            return !transcriptLines.isEmpty
+            return !transcriptLines.isEmpty || !currentTerminalLines().isEmpty
         }
         return super.canPerformAction(action, withSender: sender)
     }
 
     private func currentLastReplyText() -> String? {
+        let currentLines = currentTerminalLines()
+        if let text = TerminalSelectionCleaner.lastReplyText(fromCleanedLines: currentLines) {
+            return text
+        }
         if let text = TerminalSelectionCleaner.lastReplyText(fromCleanedLines: transcriptLines) {
             return text
         }
+        return nil
+    }
+
+    private func currentTerminalLines() -> [String] {
         let data = getTerminal().getBufferAsData(kind: .active)
-        return TerminalSelectionCleaner.lastReplyText(from: data)
+        return TerminalSelectionCleaner.cleanedLines(from: data)
     }
 
     func recordRenderedSnapshot(force: Bool = false) {
@@ -736,8 +777,7 @@ final class ZelmuxTerminalView: TerminalView {
            now.timeIntervalSince(lastTranscriptSnapshotAt) < transcriptSnapshotInterval {
             return
         }
-        let data = getTerminal().getBufferAsData(kind: .active)
-        let snapshotLines = TerminalSelectionCleaner.cleanedLines(from: data)
+        let snapshotLines = currentTerminalLines()
         guard !snapshotLines.isEmpty else { return }
         lastTranscriptSnapshotAt = now
         guard !transcriptLines.isEmpty else {

@@ -74,6 +74,7 @@ final class AppModel: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var sessionRefreshTask: Task<Void, Never>?
     private var resizeTask: Task<Void, Never>?
+    private var tabSwitchRefreshTask: Task<Void, Never>?
     private var sessionSwitchNoticeTask: Task<Void, Never>?
     private var connectionGeneration: UInt64 = 0
     private var inputSequence: UInt64 = 0
@@ -101,9 +102,13 @@ final class AppModel: ObservableObject {
         NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
             .sink { [weak self] _ in
                 Task { @MainActor in
-                    guard AppBuild.diagnosticsEnabled else { return }
-                    self?.memoryWarningCount += 1
-                    self?.recordConnectionEvent("memory warning")
+                    guard let self else { return }
+                    if AppBuild.diagnosticsEnabled {
+                        self.memoryWarningCount += 1
+                        self.recordConnectionEvent("memory warning")
+                    }
+                    self.terminalStream.reset()
+                    NotificationCenter.default.post(name: .zelmuxMemoryPressure, object: nil)
                 }
             }
             .store(in: &cancellables)
@@ -332,7 +337,47 @@ final class AppModel: ObservableObject {
 
     func sendData(_ data: Data) {
         guard let activeSession, !activeSession.isReadOnly, let transport else { return }
+        if isLikelyTabSwitchInput(data) {
+            prepareForTabSwitch()
+        }
         transport.queueBytes(data, sequence: nextInputSequence())
+    }
+
+    private func isLikelyTabSwitchInput(_ data: Data) -> Bool {
+        let bytes = Array(data)
+        if bytes == [0x1B, 0x68] || bytes == [0x1B, 0x6C] {
+            return true
+        }
+        if bytes.count == 2,
+           bytes[0] == 0x14,
+           (0x31...0x39).contains(bytes[1]) {
+            return true
+        }
+        guard let text = String(data: data, encoding: .utf8) else { return false }
+        return text.range(
+            of: "\u{001B}\\[<0;\\d+;[12]M",
+            options: .regularExpression
+        ) != nil
+    }
+
+    private func prepareForTabSwitch() {
+        terminalStream.reset()
+        scheduleTabSwitchRefresh()
+    }
+
+    private func scheduleTabSwitchRefresh() {
+        let resize = lastResize
+        tabSwitchRefreshTask?.cancel()
+        tabSwitchRefreshTask = Task { [weak self] in
+            for delay in [80_000_000, 260_000_000] as [UInt64] {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled else { return }
+                await self?.sendResizeNow(rows: resize.rows, cols: resize.cols)
+            }
+            await MainActor.run {
+                self?.tabSwitchRefreshTask = nil
+            }
+        }
     }
 
     private func nextInputSequence() -> UInt64 {
@@ -883,7 +928,8 @@ final class AppModel: ObservableObject {
                       case .connected = self.connectionState else {
                     return
                 }
-                self.recordConnectionEvent("network interface changed; keeping live websocket")
+                self.recordConnectionEvent("network interface changed; reconnecting")
+                self.reconnect(reason: "network interface change")
             }
         }
         monitor.start(queue: DispatchQueue(label: "Zelmux.Network"))
@@ -962,6 +1008,10 @@ final class AppModel: ObservableObject {
             ].filter { path.usesInterfaceType($0) }
         )
     }
+}
+
+extension Notification.Name {
+    static let zelmuxMemoryPressure = Notification.Name("Zelmux.MemoryPressure")
 }
 
 struct ConnectionLogEntry: Identifiable, Equatable {

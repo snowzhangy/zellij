@@ -50,26 +50,27 @@ enum TerminalSelectionCleaner {
     }
 
     static func lastReplyText(fromCleanedLines lines: [String]) -> String? {
+        let lines = lines.filter { !isTransientAgentLine($0) }
         guard !lines.isEmpty else { return nil }
 
         let meaningfulLastIndex = lines.indices.last { index in
             let line = lines[index]
-            return !line.trimmingCharacters(in: .whitespaces).isEmpty && !isTrailingStatusLine(line)
+            return !line.trimmingCharacters(in: .whitespaces).isEmpty
+                && !isPromptLine(line)
+                && !isTrailingStatusLine(line)
         }
         guard let meaningfulLastIndex else { return nil }
 
         let promptIndices = lines.indices.filter { isPromptLine(lines[$0]) }
         let range: ArraySlice<String>
-        if let lastPrompt = promptIndices.last {
-            if lastPrompt >= max(0, meaningfulLastIndex - 2) {
-                let previousPrompt = promptIndices.dropLast().last
-                let start = (previousPrompt.map { $0 + 1 }) ?? lines.startIndex
-                let end = max(start, lastPrompt)
-                range = lines[start..<end]
-            } else {
-                let start = min(lastPrompt + 1, lines.endIndex)
-                range = lines[start...meaningfulLastIndex]
-            }
+        if let tailPrompt = promptIndices.first(where: { $0 > meaningfulLastIndex }) {
+            let previousPrompt = promptIndices.last { $0 < tailPrompt }
+            let start = (previousPrompt.map { $0 + 1 }) ?? lines.startIndex
+            let end = max(start, tailPrompt)
+            range = lines[start..<end]
+        } else if let lastPrompt = promptIndices.last(where: { $0 < meaningfulLastIndex }) {
+            let start = min(lastPrompt + 1, lines.endIndex)
+            range = lines[start...meaningfulLastIndex]
         } else {
             let start = max(lines.startIndex, meaningfulLastIndex - 120)
             range = lines[start...meaningfulLastIndex]
@@ -127,6 +128,9 @@ enum TerminalSelectionCleaner {
         if trimmed.hasPrefix("┌") || trimmed.hasPrefix("└") || trimmed.hasPrefix("├") || trimmed.hasPrefix("╭") || trimmed.hasPrefix("╰") {
             return true
         }
+        if isDividerLine(trimmed) {
+            return true
+        }
         if trimmed.contains(" MY FOCUS ") || trimmed.contains("SCROLL:") {
             return true
         }
@@ -135,14 +139,29 @@ enum TerminalSelectionCleaner {
 
     private static func isPromptLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard trimmed.count >= 2 else { return false }
-        return trimmed.hasPrefix("> ") || trimmed.hasPrefix("› ") || trimmed.hasPrefix("❯ ")
+        guard !trimmed.isEmpty else { return false }
+        if trimmed == ">" || trimmed == "›" || trimmed == "❯" {
+            return true
+        }
+        if trimmed.hasPrefix("> ") || trimmed.hasPrefix("› ") || trimmed.hasPrefix("❯ ") {
+            return true
+        }
+        if trimmed.hasPrefix("[CAVEMAN]") {
+            return true
+        }
+        return false
     }
 
     private static func isTrailingStatusLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return false }
         if trimmed.hasPrefix("• Working") || trimmed.hasPrefix("• Done") || trimmed.hasPrefix("• Thinking") {
+            return true
+        }
+        if trimmed.hasPrefix("● Working") || trimmed.hasPrefix("● Done") || trimmed.hasPrefix("● Thinking") {
+            return true
+        }
+        if trimmed.hasPrefix("✻ ") {
             return true
         }
         if trimmed.contains(" esc to interrupt") {
@@ -152,5 +171,24 @@ enum TerminalSelectionCleaner {
             return true
         }
         return false
+    }
+
+    private static func isTransientAgentLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        if isTrailingStatusLine(trimmed) || isDividerLine(trimmed) {
+            return true
+        }
+        if trimmed == "───────────────────────────────────────────" {
+            return true
+        }
+        return false
+    }
+
+    private static func isDividerLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 8 else { return false }
+        let dividerScalars = Set("─━═-—_".unicodeScalars)
+        return trimmed.unicodeScalars.allSatisfy { dividerScalars.contains($0) }
     }
 }

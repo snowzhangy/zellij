@@ -234,8 +234,13 @@ struct PromptComposerView: View {
                     }
                     return
                 }
+                let upload = preparedPhotoUpload(
+                    data: data,
+                    filename: filename,
+                    mimeType: mimeType
+                )
                 await MainActor.run {
-                    uploadImage(data: data, filename: filename, mimeType: mimeType)
+                    uploadImage(data: upload.data, filename: upload.filename, mimeType: upload.mimeType)
                     selectedImageItem = nil
                 }
             } catch {
@@ -245,6 +250,24 @@ struct PromptComposerView: View {
                 }
             }
         }
+    }
+
+    private func preparedPhotoUpload(
+        data: Data,
+        filename: String,
+        mimeType: String
+    ) -> (data: Data, filename: String, mimeType: String) {
+        let lowercasedFilename = filename.lowercased()
+        let shouldConvertToPNG = mimeType == "image/heic"
+            || mimeType == "image/heif"
+            || lowercasedFilename.hasSuffix(".heic")
+            || lowercasedFilename.hasSuffix(".heif")
+        guard shouldConvertToPNG,
+              let image = UIImage(data: data),
+              let jpegData = image.jpegData(compressionQuality: 0.85) else {
+            return (data, filename, mimeType)
+        }
+        return (jpegData, "photo.jpg", "image/jpeg")
     }
 
     private func uploadImage(data: Data, filename: String, mimeType: String) {
@@ -271,11 +294,16 @@ struct PromptComposerView: View {
     }
 
     private func appendPath(_ path: String) {
+        let pathReference = shellQuotedPath(path)
         if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            prompt = path
+            prompt = pathReference
         } else {
-            prompt += "\n\(path)"
+            prompt += "\n\(pathReference)"
         }
+    }
+
+    private func shellQuotedPath(_ path: String) -> String {
+        "'\(path.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 }
 
