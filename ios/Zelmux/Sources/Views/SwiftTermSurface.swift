@@ -741,48 +741,55 @@ final class ZelmuxTerminalView: TerminalView {
     private let transcriptSnapshotInterval: TimeInterval = 0.25
 
     @objc func copyLastReply(_ sender: Any?) {
-        guard let text = currentLastReplyText() else { return }
-        recordRenderedSnapshot(force: true)
+        let currentLines = recordRenderedSnapshot(force: true)
+        guard let text = currentLastReplyText(currentLines: currentLines) else { return }
         UIPasteboard.general.string = text
         UIMenuController.shared.hideMenu()
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(copyLastReply(_:)) {
-            return !transcriptLines.isEmpty || !currentTerminalLines().isEmpty
+            return true
         }
         return super.canPerformAction(action, withSender: sender)
     }
 
-    private func currentLastReplyText() -> String? {
-        let currentLines = currentTerminalLines()
-        if let text = TerminalSelectionCleaner.lastReplyText(fromCleanedLines: currentLines) {
-            return text
-        }
-        if let text = TerminalSelectionCleaner.lastReplyText(fromCleanedLines: transcriptLines) {
-            return text
-        }
-        return nil
+    private func currentLastReplyText(currentLines: [String]) -> String? {
+        return TerminalSelectionCleaner.bestLastReplyText(
+            currentLines: currentLines,
+            transcriptLines: transcriptLines
+        )
     }
 
     private func currentTerminalLines() -> [String] {
-        let data = getTerminal().getBufferAsData(kind: .active)
-        return TerminalSelectionCleaner.cleanedLines(from: data)
+        // Agent CLIs may render into the alt buffer. `.active` returns whichever
+        // is current. When in alt mode, prepend `.normal` so we still see the
+        // scrollback captured before the alt screen took over.
+        let terminal = getTerminal()
+        let activeLines = TerminalSelectionCleaner.cleanedLines(
+            from: terminal.getBufferAsData(kind: .active)
+        )
+        guard terminal.isCurrentBufferAlternate else { return activeLines }
+        let normalLines = TerminalSelectionCleaner.cleanedLines(
+            from: terminal.getBufferAsData(kind: .normal)
+        )
+        return normalLines + activeLines
     }
 
-    func recordRenderedSnapshot(force: Bool = false) {
+    @discardableResult
+    func recordRenderedSnapshot(force: Bool = false) -> [String] {
         let now = Date()
         if !force,
            let lastTranscriptSnapshotAt,
            now.timeIntervalSince(lastTranscriptSnapshotAt) < transcriptSnapshotInterval {
-            return
+            return []
         }
         let snapshotLines = currentTerminalLines()
-        guard !snapshotLines.isEmpty else { return }
+        guard !snapshotLines.isEmpty else { return [] }
         lastTranscriptSnapshotAt = now
         guard !transcriptLines.isEmpty else {
             transcriptLines = snapshotLines
-            return
+            return snapshotLines
         }
 
         let overlap = longestTranscriptOverlap(with: snapshotLines)
@@ -795,6 +802,7 @@ final class ZelmuxTerminalView: TerminalView {
             transcriptLines = snapshotLines
         }
         trimTranscriptIfNeeded()
+        return snapshotLines
     }
 
     private func longestTranscriptOverlap(with snapshotLines: [String]) -> Int {

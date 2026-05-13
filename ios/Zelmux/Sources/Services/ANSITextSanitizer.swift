@@ -72,7 +72,11 @@ enum TerminalSelectionCleaner {
             let start = min(lastPrompt + 1, lines.endIndex)
             range = lines[start...meaningfulLastIndex]
         } else {
-            let start = max(lines.startIndex, meaningfulLastIndex - 120)
+            // No prompt anchors visible. Walk back from the meaningful tail
+            // until we hit a blank-line gap, which usually separates the last
+            // reply from prior content. This keeps the copy tight instead of
+            // dumping the whole visible screen.
+            let start = walkBackToBlankGap(in: lines, before: meaningfulLastIndex)
             range = lines[start...meaningfulLastIndex]
         }
 
@@ -80,6 +84,46 @@ enum TerminalSelectionCleaner {
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return reply.isEmpty ? nil : reply
+    }
+
+    static func bestLastReplyText(currentLines: [String], transcriptLines: [String]) -> String? {
+        let candidates = [
+            lastReplyText(fromCleanedLines: currentLines),
+            lastReplyText(fromCleanedLines: transcriptLines)
+        ].compactMap { $0 }
+
+        return candidates.max { lhs, rhs in
+            let lhsLines = lhs.split(separator: "\n", omittingEmptySubsequences: false).count
+            let rhsLines = rhs.split(separator: "\n", omittingEmptySubsequences: false).count
+            if lhsLines != rhsLines {
+                return lhsLines < rhsLines
+            }
+            return lhs.count < rhs.count
+        }
+    }
+
+    private static func walkBackToBlankGap(in lines: [String], before index: Int) -> Int {
+        let minimum = max(lines.startIndex, index - 200)
+        var consecutiveBlanks = 0
+        var cursor = index
+        while cursor > minimum {
+            let candidate = cursor - 1
+            let line = lines[candidate]
+            if isPromptLine(line) {
+                return cursor
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                consecutiveBlanks += 1
+                if consecutiveBlanks >= 2 {
+                    return cursor
+                }
+            } else {
+                consecutiveBlanks = 0
+            }
+            cursor = candidate
+        }
+        return minimum
     }
 
     private static func cleanedTerminalLines(from text: String) -> [String] {
@@ -132,6 +176,28 @@ enum TerminalSelectionCleaner {
             return true
         }
         if trimmed.contains(" MY FOCUS ") || trimmed.contains("SCROLL:") {
+            return true
+        }
+        if isAgentFooterLine(trimmed) {
+            return true
+        }
+        return false
+    }
+
+    private static func isAgentFooterLine(_ line: String) -> Bool {
+        if line.contains("? for shortcuts") || line.contains("? to learn") {
+            return true
+        }
+        if line.contains("auto-update") || line.contains("Auto-update") {
+            return true
+        }
+        if line.contains("Approaching usage limit") || line.contains("Context left until") {
+            return true
+        }
+        if line.contains("tokens used") || line.contains("tokens remaining") {
+            return true
+        }
+        if line.hasPrefix("Bypass Permissions") || line.hasPrefix("Auto-Accept") {
             return true
         }
         return false

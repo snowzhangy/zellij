@@ -150,6 +150,50 @@ final class ZellijWireCodecTests: XCTestCase {
         )
     }
 
+    func testBestLastReplyPrefersTranscriptOverVisibleTail() {
+        let visibleTail = [
+            "Want me to land them?"
+        ]
+        let transcript = [
+            "Earlier unrelated answer",
+            "❯ previous prompt",
+            "Item: PhotoPicker HEIC",
+            "(PromptComposerView:230)",
+            "Current: Raw Data upload, HEIC passes",
+            "through",
+            "Patch: UIImage.pngData() convert",
+            "Functional but:",
+            "- Spaces in home break agent path parse.",
+            "- HEIC from PhotoPicker breaks most agent",
+            "CLIs (can't decode).",
+            "Apply patches if you want release polish.",
+            "Want me to land them?",
+            "✻ Brewed for 10s",
+            "❯"
+        ]
+
+        let reply = TerminalSelectionCleaner.bestLastReplyText(
+            currentLines: visibleTail,
+            transcriptLines: transcript
+        )
+        XCTAssertEqual(
+            reply,
+            """
+            Item: PhotoPicker HEIC
+            (PromptComposerView:230)
+            Current: Raw Data upload, HEIC passes
+            through
+            Patch: UIImage.pngData() convert
+            Functional but:
+            - Spaces in home break agent path parse.
+            - HEIC from PhotoPicker breaks most agent
+            CLIs (can't decode).
+            Apply patches if you want release polish.
+            Want me to land them?
+            """
+        )
+    }
+
     @MainActor
     func testTerminalStreamCoalescesChunksInOrder() {
         let stream = TerminalStream()
