@@ -52,6 +52,7 @@ final class AppModel: ObservableObject {
     @Published var lastObservedPublicKeyHash: String?
     @Published var sessionSwitchNotice: String?
     @Published var optionAsMetaKey = true
+    @Published var zellijTheme: ZellijWebTheme?
     @Published private(set) var terminalTitle = ""
     @Published private(set) var terminalStatusText: String?
     @Published private(set) var reconnectCount: Int = 0
@@ -891,8 +892,9 @@ final class AppModel: ObservableObject {
             recordConnectionEvent("control log: \(lines.joined(separator: " "))")
         case .logError(let lines):
             recordConnectionEvent("control error: \(lines.joined(separator: " "))")
-        case .setConfig(_, let macOptionIsMeta):
-            recordConnectionEvent("control SetConfig macOptionIsMeta=\(macOptionIsMeta.map { String($0) } ?? "nil")")
+        case .setConfig(_, let theme, let macOptionIsMeta):
+            recordConnectionEvent("control SetConfig theme=\(theme == nil ? "nil" : "present") macOptionIsMeta=\(macOptionIsMeta.map { String($0) } ?? "nil")")
+            zellijTheme = theme
             if let macOptionIsMeta {
                 optionAsMetaKey = macOptionIsMeta
             }

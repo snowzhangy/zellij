@@ -4,9 +4,29 @@ import UIKit
 
 struct SwiftTermSurface: UIViewRepresentable {
     private static let defaultScrollbackLines = 20_000
+    private static let defaultBackgroundColor = UIColor(
+        red: 0x1E / 255.0,
+        green: 0x1E / 255.0,
+        blue: 0x1E / 255.0,
+        alpha: 1
+    )
+    private static let defaultForegroundColor = UIColor(
+        red: 0xEE / 255.0,
+        green: 0xEE / 255.0,
+        blue: 0xEC / 255.0,
+        alpha: 1
+    )
+    private static let defaultCaretColor = UIColor(
+        red: 0xB9 / 255.0,
+        green: 0x52 / 255.0,
+        blue: 0xD0 / 255.0,
+        alpha: 1
+    )
 
     @ObservedObject var stream: TerminalStream
     let fontSize: Double
+    let colorSet: TerminalColorSet
+    let zellijTheme: ZellijWebTheme?
     let isReadOnly: Bool
     let optionAsMetaKey: Bool
     let touchMode: TouchMode
@@ -37,9 +57,7 @@ struct SwiftTermSurface: UIViewRepresentable {
         ]
         view.terminalDelegate = context.coordinator
         context.coordinator.terminalView = view
-        view.nativeBackgroundColor = .black
-        view.nativeForegroundColor = .systemGreen
-        view.caretColor = .systemGreen
+        applyTerminalTheme(to: view, coordinator: context.coordinator)
         view.optionAsMetaKey = optionAsMetaKey
         view.autocapitalizationType = .none
         view.autocorrectionType = .no
@@ -64,6 +82,7 @@ struct SwiftTermSurface: UIViewRepresentable {
         if view.font.pointSize != fontSize {
             view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         }
+        applyTerminalTheme(to: view, coordinator: context.coordinator)
         applyTerminalOptions(to: view)
         context.coordinator.installFingerScroll(on: view, touchMode: touchMode)
         context.coordinator.installKeyboardToggle(on: view, touchMode: touchMode, isReadOnly: isReadOnly)
@@ -92,6 +111,32 @@ struct SwiftTermSurface: UIViewRepresentable {
         }
     }
 
+    private func applyTerminalTheme(to view: TerminalView, coordinator: Coordinator) {
+        let theme = ResolvedTerminalTheme(colorSet: colorSet, zellijTheme: zellijTheme)
+        guard coordinator.appliedThemeSignature != theme.signature else { return }
+        coordinator.appliedThemeSignature = theme.signature
+
+        if view.nativeBackgroundColor != theme.background {
+            view.nativeBackgroundColor = theme.background
+            view.layer.backgroundColor = theme.background.cgColor
+        }
+        if view.nativeForegroundColor != theme.foreground {
+            view.nativeForegroundColor = theme.foreground
+        }
+        if view.caretColor != theme.cursor {
+            view.caretColor = theme.cursor
+        }
+        if view.selectedTextBackgroundColor != theme.selectionBackground {
+            view.selectedTextBackgroundColor = theme.selectionBackground
+        }
+        if let caretTextColor = theme.cursorAccent, view.caretTextColor != caretTextColor {
+            view.caretTextColor = caretTextColor
+        }
+        if let palette = theme.ansiPalette {
+            view.installColors(palette)
+        }
+    }
+
     private static func terminalCell(at point: CGPoint, in view: TerminalView) -> (column: Int, row: Int)? {
         let terminal = view.getTerminal()
         guard view.bounds.width > 0,
@@ -111,9 +156,138 @@ struct SwiftTermSurface: UIViewRepresentable {
         return (column, row)
     }
 
+    private struct ResolvedTerminalTheme {
+        let background: UIColor
+        let foreground: UIColor
+        let cursor: UIColor
+        let cursorAccent: UIColor?
+        let selectionBackground: UIColor
+        let ansiPalette: [SwiftTerm.Color]?
+        let signature: String
+
+        init(colorSet: TerminalColorSet, zellijTheme: ZellijWebTheme?) {
+            switch colorSet {
+            case .zellij:
+                background = Self.uiColor(zellijTheme?.background) ?? SwiftTermSurface.defaultBackgroundColor
+                foreground = Self.uiColor(zellijTheme?.foreground) ?? SwiftTermSurface.defaultForegroundColor
+                cursor = Self.uiColor(zellijTheme?.cursor) ?? SwiftTermSurface.defaultCaretColor
+                cursorAccent = Self.uiColor(zellijTheme?.cursorAccent)
+                selectionBackground = Self.uiColor(zellijTheme?.selectionBackground) ?? UIColor.systemBlue.withAlphaComponent(0.45)
+                ansiPalette = Self.ansiPalette(from: zellijTheme)
+                signature = Self.signature(colorSet: colorSet, theme: zellijTheme)
+            case .macDark:
+                background = SwiftTermSurface.defaultBackgroundColor
+                foreground = SwiftTermSurface.defaultForegroundColor
+                cursor = SwiftTermSurface.defaultCaretColor
+                cursorAccent = nil
+                selectionBackground = UIColor.systemBlue.withAlphaComponent(0.45)
+                ansiPalette = nil
+                signature = colorSet.rawValue
+            case .classicGreen:
+                background = .black
+                foreground = .systemGreen
+                cursor = .systemGreen
+                cursorAccent = nil
+                selectionBackground = UIColor.systemGreen.withAlphaComponent(0.35)
+                ansiPalette = nil
+                signature = colorSet.rawValue
+            }
+        }
+
+        private static func signature(colorSet: TerminalColorSet, theme: ZellijWebTheme?) -> String {
+            [
+                colorSet.rawValue,
+                theme?.background,
+                theme?.foreground,
+                theme?.black,
+                theme?.red,
+                theme?.green,
+                theme?.yellow,
+                theme?.blue,
+                theme?.magenta,
+                theme?.cyan,
+                theme?.white,
+                theme?.brightBlack,
+                theme?.brightRed,
+                theme?.brightGreen,
+                theme?.brightYellow,
+                theme?.brightBlue,
+                theme?.brightMagenta,
+                theme?.brightCyan,
+                theme?.brightWhite,
+                theme?.cursor,
+                theme?.cursorAccent,
+                theme?.selectionBackground
+            ]
+                .map { $0 ?? "" }
+                .joined(separator: "|")
+        }
+
+        private static func ansiPalette(from theme: ZellijWebTheme?) -> [SwiftTerm.Color]? {
+            guard let theme else { return nil }
+            let values = [
+                theme.black,
+                theme.red,
+                theme.green,
+                theme.yellow,
+                theme.blue,
+                theme.magenta,
+                theme.cyan,
+                theme.white,
+                theme.brightBlack,
+                theme.brightRed,
+                theme.brightGreen,
+                theme.brightYellow,
+                theme.brightBlue,
+                theme.brightMagenta,
+                theme.brightCyan,
+                theme.brightWhite
+            ]
+            let colors = values.compactMap { swiftTermColor($0) }
+            return colors.count == values.count ? colors : nil
+        }
+
+        private static func swiftTermColor(_ rgb: String?) -> SwiftTerm.Color? {
+            guard let components = rgbComponents(rgb) else { return nil }
+            return SwiftTerm.Color(
+                red: UInt16(components.red) * 257,
+                green: UInt16(components.green) * 257,
+                blue: UInt16(components.blue) * 257
+            )
+        }
+
+        private static func uiColor(_ rgb: String?) -> UIColor? {
+            guard let components = rgbComponents(rgb) else { return nil }
+            return UIColor(
+                red: CGFloat(components.red) / 255.0,
+                green: CGFloat(components.green) / 255.0,
+                blue: CGFloat(components.blue) / 255.0,
+                alpha: 1
+            )
+        }
+
+        private static func rgbComponents(_ rgb: String?) -> (red: UInt8, green: UInt8, blue: UInt8)? {
+            guard let rgb else { return nil }
+            let trimmed = rgb.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("rgb("), trimmed.hasSuffix(")") else { return nil }
+            let inner = trimmed.dropFirst(4).dropLast()
+            let parts = inner.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard parts.count == 3,
+                  let red = UInt8(parts[0]),
+                  let green = UInt8(parts[1]),
+                  let blue = UInt8(parts[2]) else {
+                return nil
+            }
+            return (red, green, blue)
+        }
+    }
+
     final class Coordinator: NSObject, TerminalViewDelegate {
         var lastRevision = 0
         weak var terminalView: TerminalView?
+        var appliedThemeSignature: String?
         private var fingerScrollHandler: FingerScrollHandler?
         private var keyboardToggleHandler: KeyboardToggleHandler?
         private var shortcutHandler: ShortcutGestureHandler?

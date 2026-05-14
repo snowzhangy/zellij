@@ -67,7 +67,7 @@ enum SessionListStatus: String, Codable {
 }
 
 enum ZellijControlEvent: Equatable {
-    case setConfig(font: String?, macOptionIsMeta: Bool?)
+    case setConfig(font: String?, theme: ZellijWebTheme?, macOptionIsMeta: Bool?)
     case queryTerminalSize
     case switchedSession(String)
     case log([String])

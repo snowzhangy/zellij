@@ -64,6 +64,14 @@ struct SettingsView: View {
                         Text("\(Int(model.settingsStore.settings.fontSize))")
                             .font(.caption.monospacedDigit())
                     }
+                    Picker("Colors", selection: $model.settingsStore.settings.terminalColorSet) {
+                        ForEach(TerminalColorSet.allCases) { colorSet in
+                            Text(colorSet.label).tag(colorSet)
+                        }
+                    }
+                    Text(model.settingsStore.settings.terminalColorSet.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Touch") {

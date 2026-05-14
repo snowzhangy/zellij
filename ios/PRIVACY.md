@@ -37,7 +37,7 @@ The App may schedule local notifications (e.g., "agent finished") using `UNUserN
 
 The App embeds the following open-source library:
 
-- **SwiftTerm** (Apache 2.0) — terminal rendering. SwiftTerm does not make network connections.
+- **SwiftTerm** (MIT) — terminal rendering. SwiftTerm does not make network connections.
 
 No other third-party SDKs are linked.
 

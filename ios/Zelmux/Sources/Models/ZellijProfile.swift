@@ -92,10 +92,43 @@ enum TouchMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum TerminalColorSet: String, Codable, CaseIterable, Identifiable {
+    case zellij
+    case macDark
+    case classicGreen
+
+    var id: String {
+        rawValue
+    }
+
+    var label: String {
+        switch self {
+        case .zellij:
+            return "Zellij"
+        case .macDark:
+            return "Mac Dark"
+        case .classicGreen:
+            return "Classic Green"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .zellij:
+            return "Use the theme sent by the Zellij web server."
+        case .macDark:
+            return "Use a neutral dark terminal palette."
+        case .classicGreen:
+            return "Use the original green-on-black Zelmux palette."
+        }
+    }
+}
+
 struct AppSettings: Codable {
     var profiles: [ZellijProfile]
     var selectedProfileID: UUID?
     var fontSize: Double
+    var terminalColorSet: TerminalColorSet
     var promptHistory: [String]
     var snippets: [String]
 
@@ -118,9 +151,45 @@ struct AppSettings: Codable {
         profiles: [],
         selectedProfileID: nil,
         fontSize: 12,
+        terminalColorSet: .zellij,
         promptHistory: [],
         snippets: defaultSnippets
     )
+
+    init(
+        profiles: [ZellijProfile],
+        selectedProfileID: UUID?,
+        fontSize: Double,
+        terminalColorSet: TerminalColorSet,
+        promptHistory: [String],
+        snippets: [String]
+    ) {
+        self.profiles = profiles
+        self.selectedProfileID = selectedProfileID
+        self.fontSize = fontSize
+        self.terminalColorSet = terminalColorSet
+        self.promptHistory = promptHistory
+        self.snippets = snippets
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        profiles = try container.decode([ZellijProfile].self, forKey: .profiles)
+        selectedProfileID = try container.decodeIfPresent(UUID.self, forKey: .selectedProfileID)
+        fontSize = try container.decodeIfPresent(Double.self, forKey: .fontSize) ?? 12
+        terminalColorSet = try container.decodeIfPresent(TerminalColorSet.self, forKey: .terminalColorSet) ?? .zellij
+        promptHistory = try container.decodeIfPresent([String].self, forKey: .promptHistory) ?? []
+        snippets = try container.decodeIfPresent([String].self, forKey: .snippets) ?? Self.defaultSnippets
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case profiles
+        case selectedProfileID
+        case fontSize
+        case terminalColorSet
+        case promptHistory
+        case snippets
+    }
 
     func mergingDefaultSnippets() -> AppSettings {
         var copy = self

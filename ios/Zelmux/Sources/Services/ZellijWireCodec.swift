@@ -17,7 +17,7 @@ enum ZellijWireCodec {
         let raw = try JSONDecoder.zellij.decode(RawControlMessage.self, from: data)
         switch raw.type {
         case "SetConfig":
-            return .setConfig(font: raw.font, macOptionIsMeta: raw.macOptionIsMeta)
+            return .setConfig(font: raw.font, theme: raw.theme, macOptionIsMeta: raw.macOptionIsMeta)
         case "QueryTerminalSize":
             return .queryTerminalSize
         case "SwitchedSession":
@@ -63,6 +63,7 @@ private struct ClientControlMessage: Encodable {
 private struct RawControlMessage: Decodable {
     let type: String
     let font: String?
+    let theme: ZellijWebTheme?
     let macOptionIsMeta: Bool?
     let newSessionName: String?
     let lines: [String]?
@@ -70,10 +71,37 @@ private struct RawControlMessage: Decodable {
     enum CodingKeys: String, CodingKey {
         case type
         case font
+        case theme
         case macOptionIsMeta = "mac_option_is_meta"
         case newSessionName = "new_session_name"
         case lines
     }
+}
+
+struct ZellijWebTheme: Codable, Equatable {
+    let background: String?
+    let foreground: String?
+    let black: String?
+    let blue: String?
+    let brightBlack: String?
+    let brightBlue: String?
+    let brightCyan: String?
+    let brightGreen: String?
+    let brightMagenta: String?
+    let brightRed: String?
+    let brightWhite: String?
+    let brightYellow: String?
+    let cursor: String?
+    let cursorAccent: String?
+    let cyan: String?
+    let green: String?
+    let magenta: String?
+    let red: String?
+    let selectionBackground: String?
+    let selectionForeground: String?
+    let selectionInactiveBackground: String?
+    let white: String?
+    let yellow: String?
 }
 
 private struct DynamicCodingKey: CodingKey {

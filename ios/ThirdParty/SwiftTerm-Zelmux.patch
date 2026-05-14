@@ -1,0 +1,129 @@
+diff --git a/Sources/SwiftTerm/iOS/iOSTerminalView.swift b/Sources/SwiftTerm/iOS/iOSTerminalView.swift
+index e023277..12020ea 100644
+--- a/Sources/SwiftTerm/iOS/iOSTerminalView.swift
++++ b/Sources/SwiftTerm/iOS/iOSTerminalView.swift
+@@ -542,7 +542,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+     }
+ 
+     @objc
+-    public override func canPerformAction(
++    open override func canPerformAction(
+         _ action: Selector,
+         withSender sender: Any?
+     ) -> Bool {
+@@ -569,7 +569,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+     ///  - pos: the location where this was triggered in the buffer, it used at a later point
+     ///  to auto-select a word
+     func showContextMenu (forRegion: CGRect, pos: Position) {
+-        var items: [UIMenuItem] = []
++        var items: [UIMenuItem] = extraContextMenuItems
+         
+         lastLongSelect = pos
+         lastLongSelectRegion = forRegion
+@@ -926,6 +926,51 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+     // The start of the pan operation, for the case where we are not sending the input to the client
+     var panStart: Position?
+     var panTask: Task<(),Never>?
++    private var selectionPanVisiblePoint: CGPoint?
++
++    @MainActor
++    private func scrollAndExtendSelectionAtEdge() {
++        guard selection.active, let visiblePoint = selectionPanVisiblePoint else {
++            stopSelectionTimer()
++            return
++        }
++
++        let edgeDistance: CGFloat
++        let direction: CGFloat
++        if visiblePoint.y < 0 {
++            edgeDistance = -visiblePoint.y
++            direction = -1
++        } else if visiblePoint.y > bounds.height {
++            edgeDistance = visiblePoint.y - bounds.height
++            direction = 1
++        } else {
++            stopSelectionTimer()
++            return
++        }
++
++        let lineHeight = max(cellDimension.height, 1)
++        let lines = max(1, min(8, Int(edgeDistance / lineHeight) + 1))
++        let maxOffsetY = max(0, contentSize.height - bounds.height)
++        let targetOffsetY = min(
++            max(0, contentOffset.y + direction * CGFloat(lines) * lineHeight),
++            maxOffsetY
++        )
++
++        guard targetOffsetY != contentOffset.y else {
++            return
++        }
++
++        setContentOffset(CGPoint(x: contentOffset.x, y: targetOffsetY), animated: false)
++
++        let clampedVisibleY = min(max(visiblePoint.y, 0), max(0, bounds.height - 1))
++        let contentPoint = CGPoint(
++            x: min(max(visiblePoint.x, 0), max(0, bounds.width - 1)),
++            y: targetOffsetY + clampedVisibleY
++        )
++        let hit = calculateTapHit(point: contentPoint).grid
++        selection.pivotExtend(bufferPosition: hit)
++        requestDisplay()
++    }
+     
+     @objc func panSelectionHandler (_ gestureRecognizer: UIPanGestureRecognizer) {
+         func near (_ pos1: Position, _ pos2: Position) -> Bool {
+@@ -935,6 +980,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+         switch gestureRecognizer.state {
+         case .began:
+             let hit = calculateTapHit(gesture: gestureRecognizer).grid
++            selectionPanVisiblePoint = nil
+             if selection.active {
+                 var extend = false
+                 if near (selection.start, hit) {
+@@ -952,17 +998,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+             }
+             panStart = hit
+         case .changed:
+-            let absoluteY = gestureRecognizer.location (in: self).y - contentOffset.y
++            let location = gestureRecognizer.location (in: self)
++            let absoluteY = location.y - contentOffset.y
+             let hit = calculateTapHit(gesture: gestureRecognizer).grid
+             if selection.active {
+                 stopSelectionTimer()
+                 selection.pivotExtend(bufferPosition: hit)
+                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
+                 if absoluteY < 0 || absoluteY > bounds.height {
++                    selectionPanVisiblePoint = CGPoint(x: location.x, y: absoluteY)
+                     startSelectionTimer {
+-                        let newPlace = CGRect (x: 0, y: max (0, self.contentOffset.y+absoluteY), width: self.bounds.width, height: self.bounds.height)
+-                        self.scrollRectToVisible(newPlace, animated: true)
++                        self.scrollAndExtendSelectionAtEdge()
+                     }
++                } else {
++                    selectionPanVisiblePoint = nil
+                 }
+                 requestDisplay()
+             } else {
+@@ -980,12 +1029,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+             }
+         case .ended:
+             stopSelectionTimer()
++            selectionPanVisiblePoint = nil
+             if selection.active {
+                 showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: calculateTapHit(gesture: gestureRecognizer).grid)
+             }
+             break
+         case .cancelled:
+             stopSelectionTimer()
++            selectionPanVisiblePoint = nil
+             selection.active = false
+         default:
+             break
+@@ -1141,6 +1192,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
+     
+     var _inputAccessory: UIView?
+     var _inputView: UIView?
++    public var extraContextMenuItems: [UIMenuItem] = []
+     
+     ///
+     /// You can set this property to a UIView to be your input accessory, by default

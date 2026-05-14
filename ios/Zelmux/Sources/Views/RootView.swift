@@ -373,6 +373,8 @@ private struct TerminalSurface: View {
         SwiftTermSurface(
             stream: model.terminalStream,
             fontSize: model.settingsStore.settings.fontSize,
+            colorSet: model.settingsStore.settings.terminalColorSet,
+            zellijTheme: model.zellijTheme,
             isReadOnly: model.activeSession?.isReadOnly == true,
             optionAsMetaKey: model.optionAsMetaKey,
             touchMode: model.selectedProfile?.touchMode ?? .scroll,
