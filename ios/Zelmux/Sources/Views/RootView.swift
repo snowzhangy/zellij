@@ -381,8 +381,8 @@ private struct TerminalSurface: View {
             onInput: { data in
                 model.sendData(data)
             },
-            onResize: { rows, cols in
-                model.sendResize(rows: rows, cols: cols)
+            onResize: { rows, cols, metrics in
+                model.sendResize(rows: rows, cols: cols, metrics: metrics)
             },
             onFontSizeChange: { fontSize in
                 model.settingsStore.settings.fontSize = fontSize

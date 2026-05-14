@@ -11,6 +11,20 @@ struct TerminalResize: Codable {
     let cols: Int
 }
 
+struct TerminalMetrics: Codable, Equatable {
+    let cellPixelWidth: Int
+    let cellPixelHeight: Int
+    let textAreaPixelWidth: Int
+    let textAreaPixelHeight: Int
+
+    enum CodingKeys: String, CodingKey {
+        case cellPixelWidth = "cell_pixel_width"
+        case cellPixelHeight = "cell_pixel_height"
+        case textAreaPixelWidth = "text_area_pixel_width"
+        case textAreaPixelHeight = "text_area_pixel_height"
+    }
+}
+
 struct WebSocketClose: Equatable {
     let channel: String
     let code: Int?
@@ -214,6 +228,12 @@ final class ZellijWebTransport {
     func sendResize(rows: Int, cols: Int) async throws {
         guard let webClientID = zellijSession?.webClientID else { return }
         let json = try ZellijWireCodec.encodeResize(webClientID: webClientID, rows: rows, cols: cols)
+        try await controlTask?.send(.string(json))
+    }
+
+    func sendTerminalMetrics(_ metrics: TerminalMetrics) async throws {
+        guard let webClientID = zellijSession?.webClientID else { return }
+        let json = try ZellijWireCodec.encodeTerminalMetrics(webClientID: webClientID, metrics: metrics)
         try await controlTask?.send(.string(json))
     }
 

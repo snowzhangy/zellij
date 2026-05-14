@@ -31,7 +31,7 @@ struct SwiftTermSurface: UIViewRepresentable {
     let optionAsMetaKey: Bool
     let touchMode: TouchMode
     let onInput: (Data) -> Void
-    let onResize: (Int, Int) -> Void
+    let onResize: (Int, Int, TerminalMetrics?) -> Void
     let onFontSizeChange: (Double) -> Void
     let onBell: () -> Void
 
@@ -295,13 +295,13 @@ struct SwiftTermSurface: UIViewRepresentable {
         private let accessoryCustomizer = AgentKeyboardAccessoryCustomizer()
         private var memoryPressureObserver: NSObjectProtocol?
         let onInput: (Data) -> Void
-        let onResize: (Int, Int) -> Void
+        let onResize: (Int, Int, TerminalMetrics?) -> Void
         let onFontSizeChange: (Double) -> Void
         let onBell: () -> Void
 
         init(
             onInput: @escaping (Data) -> Void,
-            onResize: @escaping (Int, Int) -> Void,
+            onResize: @escaping (Int, Int, TerminalMetrics?) -> Void,
             onFontSizeChange: @escaping (Double) -> Void,
             onBell: @escaping () -> Void
         ) {
@@ -332,7 +332,19 @@ struct SwiftTermSurface: UIViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            onResize(newRows, newCols)
+            onResize(newRows, newCols, terminalMetrics(source: source, rows: newRows, cols: newCols))
+        }
+
+        private func terminalMetrics(source: TerminalView, rows: Int, cols: Int) -> TerminalMetrics? {
+            guard rows > 0, cols > 0, source.bounds.width > 0, source.bounds.height > 0 else {
+                return nil
+            }
+            return TerminalMetrics(
+                cellPixelWidth: max(1, Int((source.bounds.width / CGFloat(cols)).rounded())),
+                cellPixelHeight: max(1, Int((source.bounds.height / CGFloat(rows)).rounded())),
+                textAreaPixelWidth: max(1, Int(source.bounds.width.rounded())),
+                textAreaPixelHeight: max(1, Int(source.bounds.height.rounded()))
+            )
         }
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
         func bell(source: TerminalView) {

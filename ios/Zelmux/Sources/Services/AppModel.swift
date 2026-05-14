@@ -80,6 +80,7 @@ final class AppModel: ObservableObject {
     private var connectionGeneration: UInt64 = 0
     private var inputSequence: UInt64 = 0
     private var activeCommandStartedAt: Date?
+    private var lastTerminalMetrics: TerminalMetrics?
     private(set) var terminalBytesReceived: Int = 0
     private var cancellables: Set<AnyCancellable> = []
     private static let resizeDebounceNanoseconds: UInt64 = 150_000_000
@@ -368,12 +369,13 @@ final class AppModel: ObservableObject {
 
     private func scheduleTabSwitchRefresh() {
         let resize = lastResize
+        let metrics = lastTerminalMetrics
         tabSwitchRefreshTask?.cancel()
         tabSwitchRefreshTask = Task { [weak self] in
             for delay in [80_000_000, 260_000_000] as [UInt64] {
                 try? await Task.sleep(nanoseconds: delay)
                 guard !Task.isCancelled else { return }
-                await self?.sendResizeNow(rows: resize.rows, cols: resize.cols)
+                self?.sendResizeNow(rows: resize.rows, cols: resize.cols, metrics: metrics)
             }
             await MainActor.run {
                 self?.tabSwitchRefreshTask = nil
@@ -387,21 +389,28 @@ final class AppModel: ObservableObject {
         return inputSequence
     }
 
-    func sendResize(rows: Int, cols: Int) {
+    func sendResize(rows: Int, cols: Int, metrics: TerminalMetrics? = nil) {
         lastResize = TerminalResize(rows: rows, cols: cols)
+        if let metrics {
+            lastTerminalMetrics = metrics
+        }
         resizeTask?.cancel()
         resizeTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: Self.resizeDebounceNanoseconds)
             guard !Task.isCancelled else { return }
-            self?.sendResizeNow(rows: rows, cols: cols)
+            self?.sendResizeNow(rows: rows, cols: cols, metrics: metrics)
         }
     }
 
-    private func sendResizeNow(rows: Int, cols: Int) {
+    private func sendResizeNow(rows: Int, cols: Int, metrics: TerminalMetrics? = nil) {
         resizeTask?.cancel()
         resizeTask = nil
         Task { [weak self] in
-            try? await self?.transport?.sendResize(rows: rows, cols: cols)
+            guard let self else { return }
+            try? await self.transport?.sendResize(rows: rows, cols: cols)
+            if let metrics = metrics ?? self.lastTerminalMetrics {
+                try? await self.transport?.sendTerminalMetrics(metrics)
+            }
         }
     }
 
@@ -884,7 +893,7 @@ final class AppModel: ObservableObject {
         switch event {
         case .queryTerminalSize:
             recordConnectionEvent("control QueryTerminalSize")
-            sendResizeNow(rows: lastResize.rows, cols: lastResize.cols)
+            sendResizeNow(rows: lastResize.rows, cols: lastResize.cols, metrics: lastTerminalMetrics)
         case .switchedSession(let session):
             recordConnectionEvent("control switched session \(session)")
             showSessionSwitchNotice(session)

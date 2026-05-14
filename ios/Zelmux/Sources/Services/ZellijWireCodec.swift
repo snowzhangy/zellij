@@ -6,6 +6,18 @@ enum ZellijWireCodec {
             webClientID: webClientID,
             payload: .terminalResize(TerminalResize(rows: rows, cols: cols))
         )
+        return try encode(message)
+    }
+
+    static func encodeTerminalMetrics(webClientID: String, metrics: TerminalMetrics) throws -> String {
+        let message = ClientControlMessage(
+            webClientID: webClientID,
+            payload: .terminalMetrics(metrics)
+        )
+        return try encode(message)
+    }
+
+    private static func encode(_ message: ClientControlMessage) throws -> String {
         let data = try JSONEncoder.zellij.encode(message)
         guard let json = String(data: data, encoding: .utf8) else {
             throw CodecError.invalidUTF8
@@ -47,6 +59,7 @@ private struct ClientControlMessage: Encodable {
 
     enum Payload: Encodable {
         case terminalResize(TerminalResize)
+        case terminalMetrics(TerminalMetrics)
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: DynamicCodingKey.self)
@@ -55,6 +68,12 @@ private struct ClientControlMessage: Encodable {
                 try container.encode("TerminalResize", forKey: DynamicCodingKey("type"))
                 try container.encode(size.rows, forKey: DynamicCodingKey("rows"))
                 try container.encode(size.cols, forKey: DynamicCodingKey("cols"))
+            case .terminalMetrics(let metrics):
+                try container.encode("TerminalMetrics", forKey: DynamicCodingKey("type"))
+                try container.encode(metrics.cellPixelWidth, forKey: DynamicCodingKey("cell_pixel_width"))
+                try container.encode(metrics.cellPixelHeight, forKey: DynamicCodingKey("cell_pixel_height"))
+                try container.encode(metrics.textAreaPixelWidth, forKey: DynamicCodingKey("text_area_pixel_width"))
+                try container.encode(metrics.textAreaPixelHeight, forKey: DynamicCodingKey("text_area_pixel_height"))
             }
         }
     }
