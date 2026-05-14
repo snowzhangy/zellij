@@ -4925,6 +4925,10 @@ impl Screen {
             && !event.middle
             && !event.wheel_up
             && !event.wheel_down;
+        let active_pane_id_before = self
+            .get_active_tab(client_id)
+            .ok()
+            .and_then(|tab| tab.get_active_pane_id(client_id));
         match self
             .get_active_tab_mut(client_id)
             .and_then(|tab| tab.handle_mouse_event(&event, client_id))
@@ -4952,6 +4956,15 @@ impl Screen {
                 if mouse_effect.state_changed {
                     if !is_bare_motion {
                         let _ = self.log_and_report_session_state();
+                    }
+                    let active_pane_id_after = self
+                        .get_active_tab(client_id)
+                        .ok()
+                        .and_then(|tab| tab.get_active_pane_id(client_id));
+                    if active_pane_id_before.is_some()
+                        && active_pane_id_before != active_pane_id_after
+                    {
+                        self.clear_bell_for_focused_pane(client_id);
                     }
                     should_render = true;
                 }
@@ -7369,12 +7382,20 @@ pub(crate) fn screen_thread_main(
             },
             ScreenInstruction::ForwardedReplyFromHost { token, reply_bytes } => {
                 screen.handle_forwarded_reply_from_host(token, reply_bytes)?;
+                // The handler's replay of `pending_pty_input` mutates the
+                // grid. Without a render scheduling here the clients
+                // keep displaying the pre-reply frame
+                screen.render(None)?;
             },
             ScreenInstruction::ResumePaneAfterForward {
                 pane_id,
                 reply_bytes,
             } => {
                 screen.resume_pane_after_forward(pane_id, reply_bytes)?;
+                // Same rationale as ForwardedReplyFromHost above — the
+                // resume's replay paints the grid, so we must schedule
+                // a render before yielding back to the screen loop.
+                screen.render(None)?;
             },
             ScreenInstruction::HostTerminalThemeChanged(mode) => {
                 screen.update_host_terminal_theme_mode(mode)?;
