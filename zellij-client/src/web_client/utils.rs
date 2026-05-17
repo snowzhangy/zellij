@@ -3,7 +3,7 @@ use axum_extra::extract::cookie::Cookie;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-pub fn get_mime_type(ext: Option<&str>) -> &str {
+pub fn get_mime_type(ext: Option<&str>) -> &'static str {
     match ext {
         None => "text/plain",
         Some(ext) => match ext {
@@ -12,6 +12,11 @@ pub fn get_mime_type(ext: Option<&str>) -> &str {
             "js" => "application/javascript",
             "wasm" => "application/wasm",
             "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "heic" => "image/heic",
+            "heif" => "image/heif",
+            "webp" => "image/webp",
             "ico" => "image/x-icon",
             "svg" => "image/svg+xml",
             _ => "text/plain",

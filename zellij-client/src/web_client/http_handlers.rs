@@ -1,18 +1,20 @@
 use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
 use crate::web_client::types::{
-    AppState, CreateClientIdResponse, ImageUploadResponse, LoginRequest, LoginResponse,
-    SessionListItem, SessionListResponse, SessionStatus,
+    AppState, CreateClientIdResponse, ImageUploadListItem, ImageUploadListResponse,
+    ImageUploadResponse, LoginRequest, LoginResponse, SessionListItem, SessionListResponse,
+    SessionStatus,
 };
 use crate::web_client::utils::{get_mime_type, parse_cookies};
 use axum::{
     body::{to_bytes, Bytes},
-    extract::{Path as AxumPath, Request, State},
+    extract::{Path as AxumPath, Query, Request, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse},
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use include_dir;
+use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -40,6 +42,12 @@ const WEB_CLIENT_PAGE: &str = include_str!(concat!(
 
 const ASSETS_DIR: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets");
 const MAX_IMAGE_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+const MAX_IMAGE_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
+
+#[derive(Deserialize)]
+pub struct DownloadUploadQuery {
+    path: String,
+}
 
 pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html<String> {
     let cookies = parse_cookies(&request);
@@ -260,6 +268,116 @@ pub async fn upload_image_handler(
     }))
 }
 
+pub async fn download_uploaded_image_handler(
+    Query(query): Query<DownloadUploadQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<String>)> {
+    let upload_dir = canonical_upload_dir().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to open upload directory: {}", e)),
+        )
+    })?;
+    let requested_path = PathBuf::from(query.path);
+    let canonical_path = tokio::fs::canonicalize(&requested_path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json("Uploaded image not found".to_string()),
+        )
+    })?;
+    if !canonical_path.starts_with(&upload_dir) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json("Can only download files from the Zellij upload directory".to_string()),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical_path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json("Uploaded image not found".to_string()),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json("Requested path is not a file".to_string()),
+        ));
+    }
+    if metadata.len() > MAX_IMAGE_DOWNLOAD_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json("Uploaded image is too large".to_string()),
+        ));
+    }
+
+    let extension = canonical_path.extension().and_then(|extension| extension.to_str());
+    let extension = extension.map(|extension| extension.to_ascii_lowercase());
+    let mime_type = get_mime_type(extension.as_deref());
+    if !mime_type.starts_with("image/") {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json("Only image downloads are supported".to_string()),
+        ));
+    }
+
+    let body = tokio::fs::read(&canonical_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to read uploaded image: {}", e)),
+        )
+    })?;
+    Ok(([(header::CONTENT_TYPE, mime_type)], body))
+}
+
+pub async fn list_uploaded_images_handler(
+) -> Result<Json<ImageUploadListResponse>, (StatusCode, Json<String>)> {
+    let upload_dir = canonical_upload_dir().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to open upload directory: {}", e)),
+        )
+    })?;
+    let mut entries = tokio::fs::read_dir(&upload_dir).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to list upload directory: {}", e)),
+        )
+    })?;
+    let mut files = vec![];
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > MAX_IMAGE_DOWNLOAD_BYTES {
+            continue;
+        }
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase());
+        let mime_type = get_mime_type(extension.as_deref());
+        if !mime_type.starts_with("image/") {
+            continue;
+        }
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        files.push(ImageUploadListItem {
+            path: path.to_string_lossy().to_string(),
+            filename: entry.file_name().to_string_lossy().to_string(),
+            bytes: metadata.len(),
+            modified_ms,
+            content_type: mime_type.to_owned(),
+        });
+    }
+    files.sort_by(|left, right| right.modified_ms.cmp(&left.modified_ms));
+    Ok(Json(ImageUploadListResponse { files }))
+}
+
 fn image_upload_dir() -> PathBuf {
     if let Ok(path) = std::env::var("ZELLIJ_UPLOAD_DIR") {
         return PathBuf::from(path);
@@ -274,6 +392,12 @@ fn image_upload_dir() -> PathBuf {
             .join("uploads");
     }
     std::env::temp_dir().join("zellij").join("uploads")
+}
+
+async fn canonical_upload_dir() -> std::io::Result<PathBuf> {
+    let upload_dir = image_upload_dir();
+    tokio::fs::create_dir_all(&upload_dir).await?;
+    tokio::fs::canonicalize(upload_dir).await
 }
 
 fn upload_filename(original_filename: &str, content_type: &str) -> String {

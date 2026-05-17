@@ -191,6 +191,20 @@ pub struct ImageUploadResponse {
 }
 
 #[derive(Serialize)]
+pub struct ImageUploadListResponse {
+    pub files: Vec<ImageUploadListItem>,
+}
+
+#[derive(Serialize)]
+pub struct ImageUploadListItem {
+    pub path: String,
+    pub filename: String,
+    pub bytes: u64,
+    pub modified_ms: u128,
+    pub content_type: String,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Live,
