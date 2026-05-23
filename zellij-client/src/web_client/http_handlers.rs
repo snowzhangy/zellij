@@ -42,7 +42,8 @@ const WEB_CLIENT_PAGE: &str = include_str!(concat!(
 
 const ASSETS_DIR: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets");
 const MAX_IMAGE_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
-const MAX_IMAGE_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_FILE_UPLOAD_BYTES: usize = 100 * 1024 * 1024;
+const MAX_FILE_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct DownloadUploadQuery {
@@ -197,6 +198,19 @@ pub async fn list_sessions_handler() -> Result<Json<SessionListResponse>, (Statu
 pub async fn upload_image_handler(
     request: axum::extract::Request,
 ) -> Result<Json<ImageUploadResponse>, (StatusCode, Json<String>)> {
+    upload_file_request(request, true).await
+}
+
+pub async fn upload_file_handler(
+    request: axum::extract::Request,
+) -> Result<Json<ImageUploadResponse>, (StatusCode, Json<String>)> {
+    upload_file_request(request, false).await
+}
+
+async fn upload_file_request(
+    request: axum::extract::Request,
+    require_image: bool,
+) -> Result<Json<ImageUploadResponse>, (StatusCode, Json<String>)> {
     let is_read_only = request
         .extensions()
         .get::<IsReadOnly>()
@@ -206,7 +220,7 @@ pub async fn upload_image_handler(
     if is_read_only {
         return Err((
             StatusCode::FORBIDDEN,
-            Json("Read-only tokens cannot upload images".to_string()),
+            Json("Read-only tokens cannot upload files".to_string()),
         ));
     }
 
@@ -216,7 +230,7 @@ pub async fn upload_image_handler(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    if !content_type.starts_with("image/") {
+    if require_image && !content_type.starts_with("image/") {
         return Err((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Json("Only image uploads are supported".to_string()),
@@ -227,20 +241,25 @@ pub async fn upload_image_handler(
         .headers()
         .get("x-zellij-filename")
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("image")
+        .unwrap_or(if require_image { "image" } else { "file" })
         .to_string();
-    let body = to_bytes(request.into_body(), MAX_IMAGE_UPLOAD_BYTES)
+    let max_bytes = if require_image {
+        MAX_IMAGE_UPLOAD_BYTES
+    } else {
+        MAX_FILE_UPLOAD_BYTES
+    };
+    let body = to_bytes(request.into_body(), max_bytes)
         .await
         .map_err(|_| {
             (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json("Image upload is too large".to_string()),
+                Json("File upload is too large".to_string()),
             )
         })?;
     if body.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json("Image upload is empty".to_string()),
+            Json("File upload is empty".to_string()),
         ));
     }
 
@@ -258,7 +277,7 @@ pub async fn upload_image_handler(
     write_upload_atomically(&path, &body).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(format!("Failed to save image upload: {}", e)),
+            Json(format!("Failed to save file upload: {}", e)),
         )
     })?;
 
@@ -271,6 +290,18 @@ pub async fn upload_image_handler(
 pub async fn download_uploaded_image_handler(
     Query(query): Query<DownloadUploadQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<String>)> {
+    download_uploaded_file_response(query).await
+}
+
+pub async fn download_uploaded_file_handler(
+    Query(query): Query<DownloadUploadQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<String>)> {
+    download_uploaded_file_response(query).await
+}
+
+async fn download_uploaded_file_response(
+    query: DownloadUploadQuery,
+) -> Result<impl IntoResponse, (StatusCode, Json<String>)> {
     let upload_dir = canonical_upload_dir().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -278,12 +309,14 @@ pub async fn download_uploaded_image_handler(
         )
     })?;
     let requested_path = PathBuf::from(query.path);
-    let canonical_path = tokio::fs::canonicalize(&requested_path).await.map_err(|_| {
-        (
-            StatusCode::NOT_FOUND,
-            Json("Uploaded image not found".to_string()),
-        )
-    })?;
+    let canonical_path = tokio::fs::canonicalize(&requested_path)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                Json("Uploaded file not found".to_string()),
+            )
+        })?;
     if !canonical_path.starts_with(&upload_dir) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -294,7 +327,7 @@ pub async fn download_uploaded_image_handler(
     let metadata = tokio::fs::metadata(&canonical_path).await.map_err(|_| {
         (
             StatusCode::NOT_FOUND,
-            Json("Uploaded image not found".to_string()),
+            Json("Uploaded file not found".to_string()),
         )
     })?;
     if !metadata.is_file() {
@@ -303,30 +336,73 @@ pub async fn download_uploaded_image_handler(
             Json("Requested path is not a file".to_string()),
         ));
     }
-    if metadata.len() > MAX_IMAGE_DOWNLOAD_BYTES {
+    if metadata.len() > MAX_FILE_DOWNLOAD_BYTES {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json("Uploaded image is too large".to_string()),
+            Json("Uploaded file is too large".to_string()),
         ));
     }
 
-    let extension = canonical_path.extension().and_then(|extension| extension.to_str());
+    let extension = canonical_path
+        .extension()
+        .and_then(|extension| extension.to_str());
     let extension = extension.map(|extension| extension.to_ascii_lowercase());
     let mime_type = get_mime_type(extension.as_deref());
-    if !mime_type.starts_with("image/") {
-        return Err((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json("Only image downloads are supported".to_string()),
-        ));
-    }
 
     let body = tokio::fs::read(&canonical_path).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(format!("Failed to read uploaded image: {}", e)),
+            Json(format!("Failed to read uploaded file: {}", e)),
         )
     })?;
     Ok(([(header::CONTENT_TYPE, mime_type)], body))
+}
+
+pub async fn delete_uploaded_file_handler(
+    Query(query): Query<DownloadUploadQuery>,
+) -> Result<StatusCode, (StatusCode, Json<String>)> {
+    let upload_dir = canonical_upload_dir().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to open upload directory: {}", e)),
+        )
+    })?;
+    let requested_path = PathBuf::from(query.path);
+    let canonical_path = tokio::fs::canonicalize(&requested_path)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                Json("Uploaded file not found".to_string()),
+            )
+        })?;
+    if !canonical_path.starts_with(&upload_dir) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json("Can only delete files from the Zellij upload directory".to_string()),
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical_path).await.map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json("Uploaded file not found".to_string()),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json("Requested path is not a file".to_string()),
+        ));
+    }
+
+    tokio::fs::remove_file(&canonical_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to delete uploaded file: {}", e)),
+        )
+    })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn list_uploaded_images_handler(
@@ -349,7 +425,7 @@ pub async fn list_uploaded_images_handler(
         let Ok(metadata) = entry.metadata().await else {
             continue;
         };
-        if !metadata.is_file() || metadata.len() > MAX_IMAGE_DOWNLOAD_BYTES {
+        if !metadata.is_file() || metadata.len() > MAX_FILE_DOWNLOAD_BYTES {
             continue;
         }
         let extension = path
@@ -357,9 +433,6 @@ pub async fn list_uploaded_images_handler(
             .and_then(|extension| extension.to_str())
             .map(|extension| extension.to_ascii_lowercase());
         let mime_type = get_mime_type(extension.as_deref());
-        if !mime_type.starts_with("image/") {
-            continue;
-        }
         let modified_ms = metadata
             .modified()
             .ok()
@@ -429,17 +502,24 @@ fn sanitize_extension(extension: &str) -> String {
 }
 
 fn extension_for_content_type(content_type: &str) -> &'static str {
-    match content_type
+    let content_type = content_type
         .split(';')
         .next()
         .unwrap_or(content_type)
-        .trim()
-    {
+        .trim();
+    match content_type {
         "image/jpeg" => "jpg",
+        "image/png" => "png",
         "image/gif" => "gif",
         "image/heic" | "image/heif" => "heic",
         "image/webp" => "webp",
-        _ => "png",
+        "text/plain" => "txt",
+        "application/json" => "json",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        _ if content_type.starts_with("image/") => "png",
+        _ => "bin",
     }
 }
 
