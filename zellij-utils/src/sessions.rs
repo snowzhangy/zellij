@@ -145,40 +145,91 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 #[cfg(unix)]
 fn assert_socket(name: &str) -> bool {
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    assert_socket_path(path, Duration::from_millis(500))
+    assert_socket_path(path, Duration::from_secs(2))
+}
+
+/// Result of probing a Zellij session socket via `ConnStatus`.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProbe {
+    /// Server answered the `ConnStatus` probe with `Connected`.
+    Alive,
+    /// Socket file exists but the kernel refused the connection — server gone.
+    ConnectionRefused,
+    /// Socket file is missing on disk.
+    NotFound,
+    /// Connection accepted but server did not reply in time (busy or hung).
+    NoReply,
+    /// Other I/O failure that does not tell us whether the server is alive.
+    Other,
 }
 
 #[cfg(unix)]
-fn assert_socket_path(path: &std::path::Path, timeout: Duration) -> bool {
+impl SessionProbe {
+    /// True only when the probe received a `Connected` reply.
+    pub fn is_alive_strict(self) -> bool {
+        matches!(self, SessionProbe::Alive)
+    }
+
+    /// True unless we can confidently say the session is dead. Use this when
+    /// deciding whether it is safe to overwrite the existing socket: if the
+    /// answer is true, refuse — we might be racing a slow but live server.
+    pub fn is_alive_or_uncertain(self) -> bool {
+        !matches!(
+            self,
+            SessionProbe::ConnectionRefused | SessionProbe::NotFound
+        )
+    }
+}
+
+/// Probe an existing session socket by sending `ConnStatus` and waiting up to
+/// `timeout` for a `Connected` reply. The probe is handled by the session's
+/// independent route thread, so it stays responsive even when the main server
+/// loop is busy. The function never deletes the socket file — callers decide
+/// what to do with the result.
+#[cfg(unix)]
+pub fn probe_session_socket(path: &std::path::Path, timeout: Duration) -> SessionProbe {
     use crate::consts::ipc_connect;
     use interprocess::local_socket::traits::Stream;
 
     match ipc_connect(path) {
         Ok(stream) => {
-            // A wedged server can accept the connection but never answer ConnStatus.
-            // Keep session discovery from blocking attach/list forever.
-            if let Err(e) = stream.set_recv_timeout(Some(timeout)) {
-                log::warn!("Failed to set session socket receive timeout: {:?}", e);
-                return false;
-            }
-            if let Err(e) = stream.set_send_timeout(Some(timeout)) {
-                log::warn!("Failed to set session socket send timeout: {:?}", e);
-                return false;
+            if stream.set_recv_timeout(Some(timeout)).is_err()
+                || stream.set_send_timeout(Some(timeout)).is_err()
+            {
+                return SessionProbe::Other;
             }
             let mut sender: IpcSenderWithContext<ClientToServerMsg> =
                 IpcSenderWithContext::new(stream);
-            let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
+            if sender
+                .send_client_msg(ClientToServerMsg::ConnStatus)
+                .is_err()
+            {
+                return SessionProbe::NoReply;
+            }
             let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
             match receiver.recv_server_msg() {
-                Some((ServerToClientMsg::Connected, _)) => true,
-                None | Some((_, _)) => false,
+                Some((ServerToClientMsg::Connected, _)) => SessionProbe::Alive,
+                Some(_) | None => SessionProbe::NoReply,
             }
         },
-        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => SessionProbe::ConnectionRefused,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => SessionProbe::NotFound,
+        Err(_) => SessionProbe::Other,
+    }
+}
+
+#[cfg(unix)]
+fn assert_socket_path(path: &std::path::Path, timeout: Duration) -> bool {
+    match probe_session_socket(path, timeout) {
+        SessionProbe::Alive => true,
+        SessionProbe::ConnectionRefused => {
+            // Socket file orphaned by a dead server — clean up so future
+            // session listings don't keep reporting a phantom session.
             drop(fs::remove_file(path));
             false
         },
-        Err(_) => false,
+        _ => false,
     }
 }
 

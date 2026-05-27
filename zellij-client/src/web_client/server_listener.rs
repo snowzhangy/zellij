@@ -103,12 +103,30 @@ pub fn zellij_server_listener(
 
 
                     let session_exists = session_manager.session_exists(&session_name).unwrap_or(false);
-                    let can_resurrect = !session_exists
+                    let zellij_ipc_pipe = create_ipc_pipe(&session_name);
+                    // The fast `session_exists` probe times out aggressively
+                    // and can report false for a busy server. Re-probe with
+                    // the strict ConnStatus helper before deciding to spawn a
+                    // duplicate: only attach when the server actually answers.
+                    let socket_answers_probe = !session_exists
+                        && zellij_utils::sessions::probe_session_socket(
+                            &zellij_ipc_pipe,
+                            std::time::Duration::from_secs(2),
+                        )
+                        .is_alive_strict();
+                    if socket_answers_probe {
+                        log::warn!(
+                            "Session {:?} did not answer the fast liveness probe, but answered the strict ConnStatus probe; attaching instead of spawning a duplicate server.",
+                            session_name
+                        );
+                    }
+                    let session_is_attachable = session_exists || socket_answers_probe;
+                    let can_resurrect = !session_is_attachable
                         && session_manager
                             .get_resurrection_layout(&session_name)
                             .is_some();
 
-                    if !session_exists && !can_resurrect && !allow_create {
+                    if !session_is_attachable && !can_resurrect && !allow_create {
                         log::error!(
                             "Session {:?} does not exist and terminal attach did not allow creation.",
                             session_name
@@ -118,13 +136,13 @@ pub fn zellij_server_listener(
                         return;
                     }
 
-                    if is_read_only && !session_exists {
+                    if is_read_only && !session_is_attachable {
                         log::error!("Read only tokens cannot create new sessions.");
                         client_connection_bus.close_connection();
                         return;
                     }
 
-                    let should_create_new_session = !session_exists;
+                    let should_create_new_session = !session_is_attachable;
                     let first_message = create_first_message(
                         is_read_only,
                         config_file_path.clone(),
@@ -135,12 +153,11 @@ pub fn zellij_server_listener(
                         initial_layout,
                         tab_position_to_focus,
                     );
-                    let zellij_ipc_pipe = create_ipc_pipe(&session_name);
 
                     session_manager.spawn_session_if_needed(
                         &session_name,
                         os_input.clone(),
-                        session_exists,
+                        session_is_attachable,
                         &zellij_ipc_pipe,
                         first_message,
                     );

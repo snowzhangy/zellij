@@ -853,8 +853,50 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             let to_server = to_server.clone();
             let socket_path = socket_path.clone();
             move || {
+                #[cfg(unix)]
+                if socket_path.exists() {
+                    // Fail closed: if the probe is anything other than
+                    // ConnectionRefused or NotFound, treat the socket as
+                    // potentially live and refuse to overwrite it. This is
+                    // what prevents a slow / hung server from being shadowed
+                    // by a duplicate process that steals its socket path.
+                    let probe = zellij_utils::sessions::probe_session_socket(
+                        &socket_path,
+                        std::time::Duration::from_secs(5),
+                    );
+                    if probe.is_alive_or_uncertain() {
+                        log::error!(
+                            "Refusing to start duplicate Zellij server for session socket {} (probe: {:?})",
+                            socket_path.display(),
+                            probe
+                        );
+                        std::process::exit(1);
+                    }
+                    if let Err(e) = std::fs::remove_file(&socket_path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            log::error!(
+                                "Failed to remove stale session socket {}: {:?}",
+                                socket_path.display(),
+                                e
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
                 drop(std::fs::remove_file(&socket_path));
-                let listener = ipc_bind(&socket_path).unwrap();
+
+                let listener = match ipc_bind(&socket_path) {
+                    Ok(listener) => listener,
+                    Err(e) => {
+                        log::error!(
+                            "Failed to bind Zellij session socket {}: {:?}",
+                            socket_path.display(),
+                            e
+                        );
+                        std::process::exit(1);
+                    },
+                };
                 // set the sticky bit to avoid the socket file being potentially cleaned up
                 // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html states that for XDG_RUNTIME_DIR:
                 // "To ensure that your files are not removed, they should have their access time timestamp modified at least once every 6 hours of monotonic time or the 'sticky' bit should be set on the file. "
