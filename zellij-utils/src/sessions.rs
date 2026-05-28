@@ -223,13 +223,14 @@ pub fn probe_session_socket(path: &std::path::Path, timeout: Duration) -> Sessio
 fn assert_socket_path(path: &std::path::Path, timeout: Duration) -> bool {
     match probe_session_socket(path, timeout) {
         SessionProbe::Alive => true,
+        SessionProbe::NoReply | SessionProbe::Other => true,
         SessionProbe::ConnectionRefused => {
             // Socket file orphaned by a dead server — clean up so future
             // session listings don't keep reporting a phantom session.
             drop(fs::remove_file(path));
             false
         },
-        _ => false,
+        SessionProbe::NotFound => false,
     }
 }
 
@@ -669,7 +670,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn assert_socket_rejects_accepted_socket_that_never_replies() {
+    fn assert_socket_keeps_accepted_socket_that_never_replies() {
         let dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let socket_path = dir.path().join("silent-server.sock");
         let listener = ListenerOptions::new()
@@ -691,7 +692,10 @@ mod tests {
         let is_live = assert_socket_path(&socket_path, Duration::from_millis(100));
         let elapsed = started.elapsed();
 
-        assert!(!is_live, "silent session socket should be rejected");
+        assert!(
+            is_live,
+            "silent session socket should be treated as existing"
+        );
         assert!(
             elapsed < Duration::from_secs(1),
             "silent session socket probe took too long: {:?}",
