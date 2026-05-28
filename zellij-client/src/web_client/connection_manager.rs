@@ -46,6 +46,16 @@ impl ConnectionTable {
             .map(|c| c.add_control_tx(control_channel_tx));
     }
 
+    pub fn clear_client_control_tx_if_same(
+        &mut self,
+        client_id: &str,
+        control_channel_tx: &UnboundedSender<Message>,
+    ) {
+        self.client_id_to_channels
+            .get_mut(client_id)
+            .map(|c| c.clear_control_tx_if_same(control_channel_tx));
+    }
+
     pub fn add_client_terminal_tx(
         &mut self,
         client_id: &str,

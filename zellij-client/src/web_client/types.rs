@@ -109,6 +109,17 @@ impl ClientChannels {
         self.control_channel_tx = Some(control_channel_tx);
     }
 
+    pub fn clear_control_tx_if_same(&mut self, control_channel_tx: &UnboundedSender<Message>) {
+        if self
+            .control_channel_tx
+            .as_ref()
+            .map(|existing_tx| existing_tx.same_channel(control_channel_tx))
+            .unwrap_or(false)
+        {
+            self.control_channel_tx = None;
+        }
+    }
+
     pub fn add_terminal_tx(&mut self, terminal_channel_tx: UnboundedSender<String>) {
         self.terminal_channel_tx = Some(terminal_channel_tx);
     }

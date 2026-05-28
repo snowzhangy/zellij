@@ -87,6 +87,7 @@ async fn handle_ws_control(
     };
 
     let mut set_client_control_channel = false;
+    let mut registered_web_client_id = None;
 
     while let Some(Ok(msg)) = control_socket_rx.next().await {
         match msg {
@@ -108,10 +109,11 @@ async fn handle_ws_control(
                                 "Client attempted to use web_client_id {} that does not belong to their session",
                                 deserialized_msg.web_client_id
                             );
-                            return;
+                            break;
                         }
                         if !set_client_control_channel {
                             set_client_control_channel = true;
+                            registered_web_client_id = Some(deserialized_msg.web_client_id.clone());
                             state
                                 .connection_table
                                 .lock()
@@ -129,12 +131,19 @@ async fn handle_ws_control(
                 }
             },
             Message::Close(_) => {
-                return;
+                break;
             },
             _ => {
                 log::error!("Unsupported messagetype : {:?}", msg);
             },
         }
+    }
+    if let Some(web_client_id) = registered_web_client_id {
+        state
+            .connection_table
+            .lock()
+            .unwrap()
+            .clear_client_control_tx_if_same(&web_client_id, &control_channel_tx);
     }
 }
 
