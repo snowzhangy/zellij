@@ -223,6 +223,9 @@ impl SessionConfiguration {
     pub fn set_client_runtime_configuration(&mut self, client_id: ClientId, client_config: Config) {
         self.runtime_config.insert(client_id, client_config);
     }
+    pub fn remove_client_runtime_configuration(&mut self, client_id: ClientId) {
+        self.runtime_config.remove(&client_id);
+    }
     pub fn get_client_keybinds(&self, client_id: &ClientId) -> &Keybinds {
         self.runtime_config
             .get(client_id)
@@ -504,9 +507,6 @@ fn remove_client_and_flush_forwards(
 ) {
     let _ = os_input.remove_client(client_id);
     let stuck_tokens = session_state.write().unwrap().remove_client(client_id);
-    if stuck_tokens.is_empty() {
-        return;
-    }
     if let Some(session) = session_data.read().unwrap().as_ref() {
         for token in stuck_tokens {
             let _ = session
@@ -516,6 +516,15 @@ fn remove_client_and_flush_forwards(
                     reply_bytes: Vec::new(),
                 });
         }
+    }
+    if let Some(session) = session_data.write().unwrap().as_mut() {
+        session.current_input_modes.remove(&client_id);
+        session
+            .session_configuration
+            .remove_client_runtime_configuration(client_id);
+        let _ = session
+            .senders
+            .send_to_pty(PtyInstruction::RemoveClient(client_id));
     }
 }
 

@@ -63,6 +63,7 @@ pub enum PtyInstruction {
         Option<NotificationEnd>,
     ), // Option<usize> is the optional line number
     UpdateActivePane(Option<PaneId>, ClientId),
+    RemoveClient(ClientId),
     GoToTab(TabIndex, ClientId),
     NewTab(
         Option<PathBuf>,
@@ -164,6 +165,7 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::SpawnTerminal(..) => PtyContext::SpawnTerminal,
             PtyInstruction::OpenInPlaceEditor(..) => PtyContext::OpenInPlaceEditor,
             PtyInstruction::UpdateActivePane(..) => PtyContext::UpdateActivePane,
+            PtyInstruction::RemoveClient(_) => PtyContext::RemoveClient,
             PtyInstruction::GoToTab(..) => PtyContext::GoToTab,
             PtyInstruction::ClosePane(..) => PtyContext::ClosePane,
             PtyInstruction::CloseTab(_) => PtyContext::CloseTab,
@@ -474,6 +476,9 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
             },
             PtyInstruction::UpdateActivePane(pane_id, client_id) => {
                 pty.set_active_pane(pane_id, client_id);
+            },
+            PtyInstruction::RemoveClient(client_id) => {
+                pty.active_panes.remove(&client_id);
             },
             PtyInstruction::GoToTab(tab_index, client_id) => {
                 pty.bus

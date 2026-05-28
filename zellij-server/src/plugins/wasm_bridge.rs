@@ -1251,6 +1251,8 @@ impl WasmBridge {
             .lock()
             .unwrap()
             .retain(|c| c != &client_id);
+        self.keybinds.remove(&client_id);
+        self.base_modes.remove(&client_id);
 
         // Remove client from cached pane render report
         if let Some(ref mut prev_report) = self.previous_pane_render_report {

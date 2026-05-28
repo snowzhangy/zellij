@@ -3194,6 +3194,9 @@ impl Screen {
         self.connected_clients.borrow_mut().remove(&client_id);
         self.client_sizes.remove(&client_id);
         self.pane_render_subscribers.remove(&client_id);
+        self.currently_marking_pane_group
+            .borrow_mut()
+            .remove(&client_id);
         // The vacated tab may have lost its smallest viewer; recompute so it
         // can grow back to fit the remaining clients (no-op if none remain).
         if let Some(prev_tab_id) = previously_active_tab_id {

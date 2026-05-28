@@ -472,6 +472,7 @@ pub enum PtyContext {
     SpawnTerminalVertically,
     SpawnTerminalHorizontally,
     UpdateActivePane,
+    RemoveClient,
     GoToTab,
     NewTab,
     OverrideLayout,
