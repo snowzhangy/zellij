@@ -12,7 +12,10 @@ export function initTerminal() {
     const term = new Terminal({
         fontFamily: "Monospace",
         allowProposedApi: true,
-        scrollback: 0,
+        // Zellij owns the canonical scrollback, but keeping a small local
+        // xterm buffer prevents transient mobile viewport shrinks from
+        // discarding lines before the server-side viewport can be restored.
+        scrollback: 1000,
     });
     // for debugging
     window.term = term;

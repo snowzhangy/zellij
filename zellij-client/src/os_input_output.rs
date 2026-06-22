@@ -194,10 +194,21 @@ impl ClientOsApi for ClientOsInputOutput {
             None => {
                 let stdin = std::io::stdin();
                 let mut stdin = stdin.lock();
-                let buffer = stdin.fill_buf().unwrap();
-                let length = buffer.len();
-                let read_bytes = Vec::from(buffer);
-                stdin.consume(length);
+                // Retry on EINTR: a signal (e.g. SIGWINCH on attach/resize) can
+                // interrupt the read syscall. Previously this unwrap() panicked,
+                // killing the stdin_pump thread and the client mid-attach.
+                let read_bytes = loop {
+                    match stdin.fill_buf() {
+                        Ok(buffer) => {
+                            let length = buffer.len();
+                            let read_bytes = Vec::from(buffer);
+                            stdin.consume(length);
+                            break read_bytes;
+                        },
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => return Err("Failed to read from STDIN"),
+                    }
+                };
 
                 let session_name_after_reading_from_stdin =
                     { self.session_name.lock().unwrap().clone() };

@@ -470,6 +470,24 @@ impl SessionMetaData {
 
 impl Drop for SessionMetaData {
     fn drop(&mut self) {
+        #[cfg(not(test))]
+        let shutdown_completed = {
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let completed_in_watchdog = completed.clone();
+            let _ = thread::Builder::new()
+                .name("session_shutdown_watchdog".to_string())
+                .spawn(move || {
+                    thread::sleep(std::time::Duration::from_secs(5));
+                    if !completed_in_watchdog.load(std::sync::atomic::Ordering::SeqCst) {
+                        log::error!(
+                            "Zellij session shutdown did not complete within 5s; forcing process exit to avoid a half-dead session socket"
+                        );
+                        std::process::exit(1);
+                    }
+                });
+            completed
+        };
+
         let _ = self.senders.send_to_pty(PtyInstruction::Exit);
         let _ = self.senders.send_to_screen(ScreenInstruction::Exit);
         let _ = self.senders.send_to_plugin(PluginInstruction::Exit);
@@ -490,6 +508,8 @@ impl Drop for SessionMetaData {
         if let Some(background_jobs_thread) = self.background_jobs_thread.take() {
             let _ = background_jobs_thread.join();
         }
+        #[cfg(not(test))]
+        shutdown_completed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

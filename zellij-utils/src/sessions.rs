@@ -14,6 +14,8 @@ use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
 use suggest::Suggest;
 
+pub const SESSION_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+
 pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
     match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
         Ok(files) => {
@@ -145,7 +147,7 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 #[cfg(unix)]
 fn assert_socket(name: &str) -> bool {
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    assert_socket_path(path, Duration::from_secs(2))
+    assert_socket_path(path, SESSION_SOCKET_PROBE_TIMEOUT)
 }
 
 /// Result of probing a Zellij session socket via `ConnStatus`.
@@ -500,10 +502,12 @@ pub fn match_session_name(prefix: &str) -> Result<SessionNameMatch, io::ErrorKin
 }
 
 pub fn session_exists(name: &str) -> Result<bool, io::ErrorKind> {
-    match match_session_name(name) {
-        Ok(SessionNameMatch::Exact(_)) => Ok(true),
+    let path = &*ZELLIJ_SOCK_DIR.join(name);
+    match fs::metadata(path) {
+        Ok(metadata) if is_ipc_socket(&metadata.file_type()) => Ok(assert_socket(name)),
         Ok(_) => Ok(false),
-        Err(e) => Err(e),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.kind()),
     }
 }
 

@@ -13,8 +13,8 @@ use zellij_utils::{consts::VERSION, input::config::Config, input::options::Optio
 
 use crate::os_input_output::ClientOsApi;
 use crate::web_client::control_message::{
-    WebClientToWebServerControlMessage, WebClientToWebServerControlMessagePayload,
-    WebServerToWebClientControlMessage,
+    ViewportScrollDirection, WebClientToWebServerControlMessage,
+    WebClientToWebServerControlMessagePayload, WebServerToWebClientControlMessage,
 };
 use crate::web_client::ClientOsApiFactory;
 use zellij_utils::{
@@ -31,6 +31,27 @@ mod web_client_tests {
     use super::*;
 
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn viewport_scroll_deserializes_from_mobile_control_payload() {
+        let raw = serde_json::json!({
+            "web_client_id": "abc",
+            "payload": {
+                "type": "ViewportScroll",
+                "direction": "up",
+                "lines": 5,
+            }
+        });
+        let parsed: WebClientToWebServerControlMessage =
+            serde_json::from_value(raw).expect("parse");
+        match parsed.payload {
+            WebClientToWebServerControlMessagePayload::ViewportScroll(scroll) => {
+                assert!(matches!(scroll.direction, ViewportScrollDirection::Up));
+                assert_eq!(scroll.lines, 5);
+            },
+            other => panic!("expected ViewportScroll, got {:?}", other),
+        }
+    }
 
     async fn wait_for_server(port: u16, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();

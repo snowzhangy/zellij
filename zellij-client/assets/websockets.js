@@ -5,6 +5,9 @@
 import { handleReconnection, handleDisconnected, markConnectionEstablished } from "./connection.js";
 import { getBaseUrl, getWebSocketBaseUrl } from "./utils.js";
 
+const MIN_TERMINAL_COLS = 20;
+const MIN_TERMINAL_ROWS = 5;
+
 /**
  * Read cell pixel dimensions from xterm.js. Tries the internal
  * _renderService first (matches what the vendored FitAddon uses) and
@@ -77,6 +80,36 @@ function sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols) {
             },
         })
     );
+}
+
+function proposedDimensionsAreUsable(fitDimensions) {
+    return (
+        fitDimensions &&
+        fitDimensions.rows >= MIN_TERMINAL_ROWS &&
+        fitDimensions.cols >= MIN_TERMINAL_COLS
+    );
+}
+
+function fitTerminalWhenStable(term, fitAddon) {
+    if (document.visibilityState !== "visible") {
+        return null;
+    }
+
+    const fitDimensions = fitAddon.proposeDimensions();
+    if (fitDimensions === undefined) {
+        console.warn("failed to get new fit dimensions");
+        return null;
+    }
+    if (!proposedDimensionsAreUsable(fitDimensions)) {
+        console.debug("ignoring implausible terminal size", fitDimensions);
+        return null;
+    }
+
+    const { rows, cols } = fitDimensions;
+    if (rows !== term.rows || cols !== term.cols) {
+        term.resize(cols, rows);
+    }
+    return fitDimensions;
 }
 
 /**
@@ -218,7 +251,10 @@ export function initWebSockets(
  */
 function startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig) {
     wsControl.onopen = function (event) {
-        const fitDimensions = fitAddon.proposeDimensions();
+        const fitDimensions = fitTerminalWhenStable(term, fitAddon) || {
+            rows: term.rows,
+            cols: term.cols,
+        };
         const { rows, cols } = fitDimensions;
         sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols);
     };
@@ -256,27 +292,22 @@ function startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig) {
             const terminal = document.getElementById("terminal");
             terminal.style.background = theme.background;
 
-            const fitDimensions = fitAddon.proposeDimensions();
-            if (fitDimensions === undefined) {
-                console.warn("failed to get new fit dimensions");
-                return;
-            }
-
+            const fitDimensions = fitTerminalWhenStable(term, fitAddon) || {
+                rows: term.rows,
+                cols: term.cols,
+            };
             const { rows, cols } = fitDimensions;
-            if (rows !== term.rows || cols !== term.cols) {
-                term.resize(cols, rows);
-            }
             // Always emit a size update on SetConfig: even if the grid
             // didn't change, font metrics may have shifted and the
             // pixel-cell measurements in TerminalMetrics need to
             // refresh so host-terminal queries get accurate values.
             sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols);
         } else if (msg.type === "QueryTerminalSize") {
-            const fitDimensions = fitAddon.proposeDimensions();
+            const fitDimensions = fitTerminalWhenStable(term, fitAddon) || {
+                rows: term.rows,
+                cols: term.cols,
+            };
             const { rows, cols } = fitDimensions;
-            if (rows !== term.rows || cols !== term.cols) {
-                term.resize(cols, rows);
-            }
             sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols);
         } else if (msg.type === "Log") {
             const { lines } = msg;
@@ -318,6 +349,7 @@ export function setupResizeHandler(
     getOwnWebClientId
 ) {
     let resizeScheduled = false;
+    let resizeTimer = null;
 
     const updateViewportVars = () => {
         const root = document.documentElement;
@@ -329,23 +361,25 @@ export function setupResizeHandler(
     };
 
     const resizeTerminal = () => {
+        if (document.visibilityState !== "visible") {
+            return;
+        }
         const ownWebClientId = getOwnWebClientId();
         if (ownWebClientId === "") {
             return;
         }
 
-        const fitDimensions = fitAddon.proposeDimensions();
-        if (fitDimensions === undefined) {
-            console.warn("failed to get new fit dimensions");
+        const previousRows = term.rows;
+        const previousCols = term.cols;
+        const fitDimensions = fitTerminalWhenStable(term, fitAddon);
+        if (fitDimensions === null) {
             return;
         }
 
         const { rows, cols } = fitDimensions;
-        if (rows === term.rows && cols === term.cols) {
+        if (rows === previousRows && cols === previousCols) {
             return;
         }
-
-        term.resize(cols, rows);
 
         const wsControl = getWsControl();
         sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols);
@@ -361,10 +395,14 @@ export function setupResizeHandler(
             return;
         }
         resizeScheduled = true;
-        requestAnimationFrame(() => {
+        if (resizeTimer !== null) {
+            clearTimeout(resizeTimer);
+        }
+        resizeTimer = setTimeout(() => {
             resizeScheduled = false;
-            handleViewportChange();
-        });
+            resizeTimer = null;
+            requestAnimationFrame(handleViewportChange);
+        }, 120);
     };
 
     updateViewportVars();
@@ -372,4 +410,10 @@ export function setupResizeHandler(
     if (window.visualViewport) {
         window.visualViewport.addEventListener("resize", scheduleResize);
     }
+    document.addEventListener("visibilitychange", () => {
+        updateViewportVars();
+        if (document.visibilityState === "visible") {
+            scheduleResize();
+        }
+    });
 }

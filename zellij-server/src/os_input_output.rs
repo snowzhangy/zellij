@@ -31,6 +31,7 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 pub use async_trait::async_trait;
@@ -225,10 +226,10 @@ impl ClientSender {
         std::thread::spawn(move || {
             let err_context = || format!("failed to send message to client {client_id}");
             for msg in client_buffer_receiver.iter() {
-                sender
-                    .send_server_msg(msg)
-                    .with_context(err_context)
-                    .non_fatal();
+                if let Err(e) = sender.send_server_msg(msg).with_context(err_context) {
+                    Err::<(), _>(e).non_fatal();
+                    break;
+                }
             }
             let _ = sender.send_server_msg(ServerToClientMsg::Exit {
                 exit_reason: ExitReason::Disconnect,
@@ -261,6 +262,18 @@ impl ClientSender {
             .with_context(err_context)
     }
 }
+
+#[cfg(unix)]
+fn set_client_socket_send_timeout(stream: &LocalSocketStream, client_id: ClientId) {
+    use interprocess::local_socket::traits::Stream;
+
+    if let Err(err) = stream.set_send_timeout(Some(Duration::from_secs(2))) {
+        log::warn!("failed to set send timeout for client {client_id}: {err}");
+    }
+}
+
+#[cfg(not(unix))]
+fn set_client_socket_send_timeout(_stream: &LocalSocketStream, _client_id: ClientId) {}
 
 #[derive(Clone)]
 pub struct ServerOsInputOutput {
@@ -449,6 +462,7 @@ impl ServerOsApi for ServerOsInputOutput {
         client_id: ClientId,
         stream: LocalSocketStream,
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
+        set_client_socket_send_timeout(&stream, client_id);
         let receiver = IpcReceiverWithContext::new(stream);
         let sender = ClientSender::new(client_id, receiver.get_sender());
         self.client_senders
@@ -465,6 +479,7 @@ impl ServerOsApi for ServerOsInputOutput {
         stream: LocalSocketStream,
         reply_stream: LocalSocketStream,
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
+        set_client_socket_send_timeout(&reply_stream, client_id);
         let receiver = IpcReceiverWithContext::new(stream);
         let sender = ClientSender::new(client_id, IpcSenderWithContext::new(reply_stream));
         self.client_senders

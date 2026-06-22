@@ -13,6 +13,7 @@ pub struct WebClientToWebServerControlMessage {
 pub enum WebClientToWebServerControlMessagePayload {
     TerminalResize(Size),
     TerminalMetrics(TerminalMetricsPayload),
+    ViewportScroll(ViewportScrollPayload),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -21,6 +22,19 @@ pub struct TerminalMetricsPayload {
     pub cell_pixel_height: usize,
     pub text_area_pixel_width: usize,
     pub text_area_pixel_height: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ViewportScrollPayload {
+    pub direction: ViewportScrollDirection,
+    pub lines: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewportScrollDirection {
+    Up,
+    Down,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

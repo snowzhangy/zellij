@@ -19,6 +19,12 @@ pub fn get_mime_type(ext: Option<&str>) -> &'static str {
             "webp" => "image/webp",
             "ico" => "image/x-icon",
             "svg" => "image/svg+xml",
+            "pdf" => "application/pdf",
+            "zip" => "application/zip",
+            "gz" => "application/gzip",
+            "json" => "application/json",
+            "txt" | "md" | "log" => "text/plain",
+            "csv" => "text/csv",
             _ => "text/plain",
         },
     }

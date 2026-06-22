@@ -12,18 +12,25 @@ document.addEventListener("DOMContentLoaded", async (event) => {
     const { term, fitAddon } = initTerminal();
     const sessionName = location.pathname.split("/").pop();
 
+    let websockets = null;
     let sendAnsiKey = (ansiKey) => {
         // This will be replaced by the WebSocket module
     };
-    
-    setupInputHandlers(term, sendAnsiKey);
+    setupInputHandlers(term, (ansiKey) => sendAnsiKey(ansiKey), {
+        getWsControl: () => websockets && websockets.getWsControl(),
+        getOwnWebClientId: () =>
+            websockets ? websockets.getOwnWebClientId() : "",
+    });
 
     document.title = sessionName;
-    const websockets = initWebSockets(webClientId, sessionName, term, fitAddon, sendAnsiKey);
-    
+    websockets = initWebSockets(
+        webClientId,
+        sessionName,
+        term,
+        fitAddon,
+        sendAnsiKey
+    );
+
     // Update sendAnsiKey to use the actual WebSocket function returned by initWebSockets
     sendAnsiKey = websockets.sendAnsiKey;
-    
-    // Update the input handlers with the correct sendAnsiKey function
-    setupInputHandlers(term, sendAnsiKey);
 });

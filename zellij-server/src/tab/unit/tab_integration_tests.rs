@@ -4072,9 +4072,100 @@ fn pane_in_sgr_normal_event_tracking_mouse_mode() {
             "\u{1b}[<2;75;7m".to_string(), // SGR right button release
             "\u{1b}[<1;71;5M".to_string(), // SGR middle click
             // no hold event here, as hold events are not reported in normal mode
-            "\u{1b}[<1;75;7m".to_string(),  // SGR middle button release
-            "\u{1b}[<64;71;5M".to_string(), // SGR scroll up
-            "\u{1b}[<65;71;5M".to_string(), // SGR scroll down
+            "\u{1b}[<1;75;7m".to_string(), // SGR middle button release
+        ]
+    );
+}
+
+#[test]
+fn pane_in_sgr_normal_event_tracking_mouse_mode_keeps_scrollback_scroll() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+
+    let mut pty_instruction_bus = MockPtyInstructionBus::new();
+    let mut tab = create_new_tab_with_mock_pty_writer(
+        size,
+        ModeInfo::default(),
+        pty_instruction_bus.pty_write_sender(),
+    );
+    pty_instruction_bus.start();
+
+    let sgr_mouse_mode = String::from("\u{1b}[?1000;1006h");
+    tab.handle_pty_bytes(1, sgr_mouse_mode.as_bytes().to_vec())
+        .unwrap();
+
+    let mut content = String::new();
+    for i in 0..50 {
+        content.push_str(&format!("Line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, Vec::from(content.as_bytes()))
+        .unwrap();
+
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    let snapshot_before = take_snapshot(
+        output.serialize().unwrap().get(&client_id).unwrap(),
+        size.rows,
+        size.cols,
+        Palette::default(),
+    );
+
+    tab.handle_scrollwheel_up(&Position::new(5, 71), 3, client_id)
+        .unwrap();
+
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    let snapshot_after = take_snapshot(
+        output.serialize().unwrap().get(&client_id).unwrap(),
+        size.rows,
+        size.cols,
+        Palette::default(),
+    );
+
+    pty_instruction_bus.exit();
+
+    assert_ne!(snapshot_before, snapshot_after);
+    assert!(
+        pty_instruction_bus.clone_output().is_empty(),
+        "scroll in normal screen should not be forwarded to terminal"
+    );
+}
+
+#[test]
+fn pane_in_alternate_screen_sgr_mouse_mode_receives_scroll() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+
+    let mut pty_instruction_bus = MockPtyInstructionBus::new();
+    let mut tab = create_new_tab_with_mock_pty_writer(
+        size,
+        ModeInfo::default(),
+        pty_instruction_bus.pty_write_sender(),
+    );
+    pty_instruction_bus.start();
+
+    let alternate_screen_with_sgr_mouse = String::from("\u{1b}[?1049h\u{1b}[?1000;1006h");
+    tab.handle_pty_bytes(1, alternate_screen_with_sgr_mouse.as_bytes().to_vec())
+        .unwrap();
+
+    tab.handle_scrollwheel_up(&Position::new(5, 71), 1, client_id)
+        .unwrap();
+    tab.handle_scrollwheel_down(&Position::new(5, 71), 1, client_id)
+        .unwrap();
+
+    pty_instruction_bus.exit();
+
+    assert_eq!(
+        pty_instruction_bus.clone_output(),
+        vec![
+            "\u{1b}[<64;71;5M".to_string(),
+            "\u{1b}[<65;71;5M".to_string(),
         ]
     );
 }

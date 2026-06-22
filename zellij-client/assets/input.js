@@ -9,8 +9,9 @@ import { isMac } from "./utils.js";
  * Set up all input handlers for the terminal
  * @param {Terminal} term - The terminal instance
  * @param {function} sendFunction - Function to send data through WebSocket
+ * @param {object} control - Optional control WebSocket accessors
  */
-export function setupInputHandlers(term, sendFunction) {
+export function setupInputHandlers(term, sendFunction, control = {}) {
     // Mouse tracking state
     let prev_col = 0;
     let prev_row = 0;
@@ -109,6 +110,33 @@ export function setupInputHandlers(term, sendFunction) {
     let last_touch_y = null;
     let pending_scroll = 0;
     const touch_scroll_threshold = 24;
+    const sendViewportScroll = (direction, lines) => {
+        const wsControl = control.getWsControl && control.getWsControl();
+        const ownWebClientId =
+            control.getOwnWebClientId && control.getOwnWebClientId();
+        if (
+            !wsControl ||
+            wsControl.readyState !== WebSocket.OPEN ||
+            !ownWebClientId
+        ) {
+            return false;
+        }
+        try {
+            wsControl.send(
+                JSON.stringify({
+                    web_client_id: ownWebClientId,
+                    payload: {
+                        type: "ViewportScroll",
+                        direction,
+                        lines,
+                    },
+                })
+            );
+            return true;
+        } catch (_) {
+            return false;
+        }
+    };
     const sendWheelEvent = (direction, touch) => {
         let { col, row } = term._core._mouseService.getMouseReportCoords(
             { clientX: touch.clientX, clientY: touch.clientY },
@@ -116,6 +144,15 @@ export function setupInputHandlers(term, sendFunction) {
         );
         const button = direction < 0 ? 65 : 64; // inverted: swipe up => wheel down
         sendFunction(`\x1b[<${button};${col + 1};${row + 1}M`);
+    };
+    const sendTouchScroll = (direction, lines, touch) => {
+        const viewportDirection = direction < 0 ? "down" : "up";
+        if (sendViewportScroll(viewportDirection, lines)) {
+            return;
+        }
+        for (let i = 0; i < lines; i++) {
+            sendWheelEvent(direction, touch);
+        }
     };
 
     terminal_element.addEventListener(
@@ -140,13 +177,21 @@ export function setupInputHandlers(term, sendFunction) {
             const delta = touch.clientY - last_touch_y;
             last_touch_y = touch.clientY;
             pending_scroll += delta;
+            let lines = 0;
             while (pending_scroll <= -touch_scroll_threshold) {
-                sendWheelEvent(-1, touch);
+                lines += 1;
                 pending_scroll += touch_scroll_threshold;
             }
+            if (lines > 0) {
+                sendTouchScroll(-1, lines, touch);
+            }
+            lines = 0;
             while (pending_scroll >= touch_scroll_threshold) {
-                sendWheelEvent(1, touch);
+                lines += 1;
                 pending_scroll -= touch_scroll_threshold;
+            }
+            if (lines > 0) {
+                sendTouchScroll(1, lines, touch);
             }
         },
         { passive: false }
@@ -185,9 +230,8 @@ export function setupInputHandlers(term, sendFunction) {
 
 /**
  * Install the IME-bypass input listener exactly once per page load.
- * The send-function reference is refreshed on every call so the real
- * WebSocket sender (installed after initWebSockets) replaces the initial
- * placeholder — see index.js where setupInputHandlers is called twice.
+ * The send-function reference is still stored separately because tests and
+ * callers can replace the sender without reinstalling DOM listeners.
  */
 function installImeBypass(term, sendFunction) {
     if (typeof window.__zjImeBypass === "undefined") {

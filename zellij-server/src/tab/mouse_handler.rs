@@ -1527,15 +1527,21 @@ impl MouseHandler {
 
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
-            if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
-                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
-                    .with_context(err_context)?;
-            } else if pane.is_alternate_mode_active() {
-                // faux scrolling, send UP n times
-                // do n separate writes to make sure the sequence gets adjusted for cursor keys mode
-                for _ in 0..lines {
-                    tab.write_to_terminal_at("\u{1b}[A".as_bytes().to_owned(), point, client_id)
+            if pane.is_alternate_mode_active() {
+                if let Some(mouse_event) = pane.mouse_scroll_up(&relative_position) {
+                    tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
                         .with_context(err_context)?;
+                } else {
+                    // faux scrolling, send UP n times
+                    // do n separate writes to make sure the sequence gets adjusted for cursor keys mode
+                    for _ in 0..lines {
+                        tab.write_to_terminal_at(
+                            "\u{1b}[A".as_bytes().to_owned(),
+                            point,
+                            client_id,
+                        )
+                        .with_context(err_context)?;
+                    }
                 }
             } else {
                 pane.scroll_up(lines, client_id);
@@ -1558,15 +1564,21 @@ impl MouseHandler {
 
         if let Some(pane) = Self::get_pane_at(tab, point, false).with_context(err_context)? {
             let relative_position = pane.relative_position(point);
-            if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
-                tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
-                    .with_context(err_context)?;
-            } else if pane.is_alternate_mode_active() {
-                // faux scrolling, send DOWN n times
-                // do n separate writes to make sure the sequence gets adjusted for cursor keys mode
-                for _ in 0..lines {
-                    tab.write_to_terminal_at("\u{1b}[B".as_bytes().to_owned(), point, client_id)
+            if pane.is_alternate_mode_active() {
+                if let Some(mouse_event) = pane.mouse_scroll_down(&relative_position) {
+                    tab.write_to_terminal_at(mouse_event.into_bytes(), point, client_id)
                         .with_context(err_context)?;
+                } else {
+                    // faux scrolling, send DOWN n times
+                    // do n separate writes to make sure the sequence gets adjusted for cursor keys mode
+                    for _ in 0..lines {
+                        tab.write_to_terminal_at(
+                            "\u{1b}[B".as_bytes().to_owned(),
+                            point,
+                            client_id,
+                        )
+                        .with_context(err_context)?;
+                    }
                 }
             } else {
                 pane.scroll_down(lines, client_id);

@@ -104,14 +104,14 @@ pub fn zellij_server_listener(
 
                     let session_exists = session_manager.session_exists(&session_name).unwrap_or(false);
                     let zellij_ipc_pipe = create_ipc_pipe(&session_name);
-                    // The fast `session_exists` probe times out aggressively
-                    // and can report false for a busy server. Re-probe with
-                    // the strict ConnStatus helper before deciding to spawn a
-                    // duplicate: only attach when the server actually answers.
+                    // `session_exists` checks the exact socket path and treats
+                    // uncertain sockets as alive. This strict re-probe only
+                    // catches a narrow race where a server appears between the
+                    // exact-path check and the spawn decision.
                     let socket_answers_probe = !session_exists
                         && zellij_utils::sessions::probe_session_socket(
                             &zellij_ipc_pipe,
-                            std::time::Duration::from_secs(2),
+                            zellij_utils::sessions::SESSION_SOCKET_PROBE_TIMEOUT,
                         )
                         .is_alive_strict();
                     if socket_answers_probe {
