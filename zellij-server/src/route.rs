@@ -2155,6 +2155,17 @@ pub(crate) fn route_thread_main(
     'route_loop: loop {
         match receiver.recv_client_msg() {
             Some((instruction, err_ctx)) => {
+                // The outbound sender can fail independently while this inbound socket is still
+                // readable. Stop routing immediately once the server has removed the client so
+                // stale input cannot flood Screen with an invalid client id. Exiting also drops
+                // the final server-side socket clone, allowing the client to observe EOF.
+                if !os_input.client_is_connected(client_id) {
+                    log::warn!(
+                        "Client route for disconnected client id {} received input; closing route",
+                        client_id
+                    );
+                    break 'route_loop;
+                }
                 err_ctx.update_thread_ctx();
                 let mut handle_instruction = |instruction: ClientToServerMsg,
                                               mut retry_queue: Option<
@@ -2641,7 +2652,16 @@ pub(crate) fn route_thread_main(
         // signal to the client that the action has finished processing and it can either exit (if
         // it's a cli client) or allow the user to perform another action (if it's an actively
         // connected user)
-        let _ = os_input.send_to_client(client_id, ServerToClientMsg::UnblockInputThread);
+        if os_input
+            .send_to_client(client_id, ServerToClientMsg::UnblockInputThread)
+            .is_err()
+        {
+            log::warn!(
+                "Failed to unblock client id {}; closing its route",
+                client_id
+            );
+            break 'route_loop;
+        }
     }
     // route thread exited, make sure we clean up
     let _ = to_server.send(ServerInstruction::RemoveClient(client_id));

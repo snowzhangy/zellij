@@ -24,7 +24,7 @@ use zellij_utils::{
 };
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     fs::File,
     io::{self, Write},
@@ -208,10 +208,15 @@ fn build_command(
 struct ClientSender {
     client_id: ClientId,
     client_buffer_sender: channels::Sender<ServerToClientMsg>,
+    dead_clients: Arc<Mutex<HashSet<ClientId>>>,
 }
 
 impl ClientSender {
-    pub fn new(client_id: ClientId, mut sender: IpcSenderWithContext<ServerToClientMsg>) -> Self {
+    pub fn new(
+        client_id: ClientId,
+        mut sender: IpcSenderWithContext<ServerToClientMsg>,
+        dead_clients: Arc<Mutex<HashSet<ClientId>>>,
+    ) -> Self {
         // FIXME(hartan): This queue is responsible for buffering messages between server and
         // client. If it fills up, the client is disconnected with a "Buffer full" sort of error
         // message. It was previously found to be too small (with depth 50), so it was increased to
@@ -223,11 +228,13 @@ impl ClientSender {
         // queue for the time being because we want to prevent e.g. the whole session being killed
         // (by OOM-killers or some other mechanism) just because a single client doesn't respond.
         let (client_buffer_sender, client_buffer_receiver) = channels::bounded(5000);
+        let thread_dead_clients = dead_clients.clone();
         std::thread::spawn(move || {
             let err_context = || format!("failed to send message to client {client_id}");
             for msg in client_buffer_receiver.iter() {
                 if let Err(e) = sender.send_server_msg(msg).with_context(err_context) {
                     Err::<(), _>(e).non_fatal();
+                    mark_client_dead(&thread_dead_clients, client_id);
                     break;
                 }
             }
@@ -238,6 +245,7 @@ impl ClientSender {
         ClientSender {
             client_id,
             client_buffer_sender,
+            dead_clients,
         }
     }
     pub fn send_or_buffer(&self, msg: ServerToClientMsg) -> Result<()> {
@@ -256,10 +264,17 @@ impl ClientSender {
                         "client {} is processing server messages too slow",
                         self.client_id
                     );
+                    mark_client_dead(&self.dead_clients, self.client_id);
                 }
                 Err(err)
             })
             .with_context(err_context)
+    }
+}
+
+fn mark_client_dead(dead_clients: &Arc<Mutex<HashSet<ClientId>>>, client_id: ClientId) {
+    if let Ok(mut dead_clients) = dead_clients.lock() {
+        dead_clients.insert(client_id);
     }
 }
 
@@ -279,6 +294,7 @@ fn set_client_socket_send_timeout(_stream: &LocalSocketStream, _client_id: Clien
 pub struct ServerOsInputOutput {
     pty_backend: PtyBackendImpl,
     client_senders: Arc<Mutex<HashMap<ClientId, ClientSender>>>,
+    dead_clients: Arc<Mutex<HashSet<ClientId>>>,
     cached_resizes: Arc<Mutex<Option<BTreeMap<u32, (u16, u16, Option<u16>, Option<u16>)>>>>,
 }
 
@@ -337,6 +353,12 @@ pub trait ServerOsApi: Send + Sync {
     /// Returns a [`Box`] pointer to this [`ServerOsApi`] struct.
     fn box_clone(&self) -> Box<dyn ServerOsApi>;
     fn send_to_client(&self, client_id: ClientId, msg: ServerToClientMsg) -> Result<()>;
+    fn client_is_connected(&self, _client_id: ClientId) -> bool {
+        true
+    }
+    fn drain_dead_clients(&self) -> Vec<ClientId> {
+        Vec::new()
+    }
     fn new_client(
         &mut self,
         client_id: ClientId,
@@ -457,6 +479,20 @@ impl ServerOsApi for ServerOsInputOutput {
         }
     }
 
+    fn client_is_connected(&self, client_id: ClientId) -> bool {
+        self.client_senders
+            .lock()
+            .map(|client_senders| client_senders.contains_key(&client_id))
+            .unwrap_or(false)
+    }
+
+    fn drain_dead_clients(&self) -> Vec<ClientId> {
+        self.dead_clients
+            .lock()
+            .map(|mut dead_clients| dead_clients.drain().collect())
+            .unwrap_or_default()
+    }
+
     fn new_client(
         &mut self,
         client_id: ClientId,
@@ -464,7 +500,7 @@ impl ServerOsApi for ServerOsInputOutput {
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
         set_client_socket_send_timeout(&stream, client_id);
         let receiver = IpcReceiverWithContext::new(stream);
-        let sender = ClientSender::new(client_id, receiver.get_sender());
+        let sender = ClientSender::new(client_id, receiver.get_sender(), self.dead_clients.clone());
         self.client_senders
             .lock()
             .to_anyhow()
@@ -481,7 +517,11 @@ impl ServerOsApi for ServerOsInputOutput {
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
         set_client_socket_send_timeout(&reply_stream, client_id);
         let receiver = IpcReceiverWithContext::new(stream);
-        let sender = ClientSender::new(client_id, IpcSenderWithContext::new(reply_stream));
+        let sender = ClientSender::new(
+            client_id,
+            IpcSenderWithContext::new(reply_stream),
+            self.dead_clients.clone(),
+        );
         self.client_senders
             .lock()
             .to_anyhow()
@@ -498,6 +538,9 @@ impl ServerOsApi for ServerOsInputOutput {
             .with_context(|| format!("failed to remove client {client_id}"))?;
         if client_senders.contains_key(&client_id) {
             client_senders.remove(&client_id);
+        }
+        if let Ok(mut dead_clients) = self.dead_clients.lock() {
+            dead_clients.remove(&client_id);
         }
         Ok(())
     }
@@ -709,6 +752,7 @@ pub fn get_server_os_input() -> Result<ServerOsInputOutput, std::io::Error> {
     Ok(ServerOsInputOutput {
         pty_backend: PtyBackendImpl::new()?,
         client_senders: Arc::new(Mutex::new(HashMap::new())),
+        dead_clients: Arc::new(Mutex::new(HashSet::new())),
         cached_resizes: Arc::new(Mutex::new(None)),
     })
 }

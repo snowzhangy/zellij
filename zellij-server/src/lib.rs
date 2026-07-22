@@ -34,6 +34,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
     thread,
+    time::Duration,
 };
 use zellij_utils::envs;
 use zellij_utils::pane_size::Size;
@@ -525,16 +526,29 @@ fn remove_client_and_flush_forwards(
     session_state: &Arc<RwLock<SessionState>>,
     session_data: &Arc<RwLock<Option<SessionMetaData>>>,
 ) {
+    let is_watcher = session_state.read().unwrap().is_watcher(&client_id);
+    let senders = session_data
+        .read()
+        .unwrap()
+        .as_ref()
+        .map(|session| session.senders.clone());
+
     let _ = os_input.remove_client(client_id);
+    if is_watcher {
+        session_state.write().unwrap().remove_watcher(client_id);
+        if let Some(senders) = senders {
+            let _ = senders.send_to_screen(ScreenInstruction::RemoveWatcherClient(client_id));
+        }
+        return;
+    }
+
     let stuck_tokens = session_state.write().unwrap().remove_client(client_id);
-    if let Some(session) = session_data.read().unwrap().as_ref() {
+    if let Some(senders) = &senders {
         for token in stuck_tokens {
-            let _ = session
-                .senders
-                .send_to_screen(ScreenInstruction::ForwardedReplyFromHost {
-                    token,
-                    reply_bytes: Vec::new(),
-                });
+            let _ = senders.send_to_screen(ScreenInstruction::ForwardedReplyFromHost {
+                token,
+                reply_bytes: Vec::new(),
+            });
         }
     }
     if let Some(session) = session_data.write().unwrap().as_mut() {
@@ -545,6 +559,24 @@ fn remove_client_and_flush_forwards(
         let _ = session
             .senders
             .send_to_pty(PtyInstruction::RemoveClient(client_id));
+    }
+    if let Some(senders) = senders {
+        let _ = senders.send_to_screen(ScreenInstruction::RemoveClient(client_id));
+        let _ = senders.send_to_plugin(PluginInstruction::RemoveClient(client_id));
+    }
+}
+
+fn cleanup_dead_clients(
+    os_input: &mut Box<dyn ServerOsApi>,
+    session_state: &Arc<RwLock<SessionState>>,
+    session_data: &Arc<RwLock<Option<SessionMetaData>>>,
+) {
+    for client_id in os_input.drain_dead_clients() {
+        log::warn!(
+            "client {} sender failed or became too slow; removing stale client state",
+            client_id
+        );
+        remove_client_and_flush_forwards(client_id, os_input, session_state, session_data);
     }
 }
 
@@ -983,7 +1015,14 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
         });
 
     loop {
-        let (instruction, mut err_ctx) = server_receiver.recv().unwrap();
+        cleanup_dead_clients(&mut os_input, &session_state, &session_data);
+        let (instruction, mut err_ctx) =
+            match server_receiver.recv_timeout(Duration::from_millis(250)) {
+                Ok(instruction) => instruction,
+                Err(channels::RecvTimeoutError::Timeout) => continue,
+                Err(channels::RecvTimeoutError::Disconnected) => break,
+            };
+        cleanup_dead_clients(&mut os_input, &session_state, &session_data);
         err_ctx.add_call(ContextType::IPCServer((&instruction).into()));
         match instruction {
             ServerInstruction::FirstClientConnected(cli_assets, is_web_client, client_id) => {
