@@ -212,6 +212,13 @@ async fn handle_ws_terminal(
 
     let (attachment_complete_tx, attachment_complete_rx) = tokio::sync::oneshot::channel();
 
+    // A connection with no session name in the path (the web root,
+    // `/ws/terminal`) is the "create a new session" entrypoint, so allow
+    // creation there even when the client did not pass `create=true`. A
+    // named path (`/ws/terminal/{session}`) still defaults to attach-only
+    // so a stale/typo'd name does not silently spawn a duplicate server.
+    let allow_create = params.create.unwrap_or(session_name.is_none());
+
     zellij_server_listener(
         os_input.clone(),
         state.connection_table.clone(),
@@ -222,7 +229,7 @@ async fn handle_ws_terminal(
         web_client_id.clone(),
         state.session_manager.clone(),
         Some(attachment_complete_tx),
-        params.create.unwrap_or(false),
+        allow_create,
         params.tab_position_to_focus,
     );
 
