@@ -196,6 +196,15 @@ pub struct SessionListItem {
 }
 
 #[derive(Serialize)]
+pub struct SessionActionResponse {
+    pub session: String,
+    pub action: String,
+    pub live_session_signal_sent: bool,
+    pub resurrection_data_removed: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
 pub struct ImageUploadResponse {
     pub path: String,
     pub bytes: usize,

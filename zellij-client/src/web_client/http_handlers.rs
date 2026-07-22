@@ -1,8 +1,8 @@
 use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
 use crate::web_client::types::{
     AppState, CreateClientIdResponse, ImageUploadListItem, ImageUploadListResponse,
-    ImageUploadResponse, LoginRequest, LoginResponse, SessionListItem, SessionListResponse,
-    SessionStatus,
+    ImageUploadResponse, LoginRequest, LoginResponse, SessionActionResponse, SessionListItem,
+    SessionListResponse, SessionStatus,
 };
 use crate::web_client::utils::{get_mime_type, parse_cookies};
 use axum::{
@@ -16,13 +16,15 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use include_dir;
 use serde::Deserialize;
 use std::{
+    io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use zellij_utils::{
-    consts::VERSION,
-    sessions::{get_resurrectable_sessions, get_sessions},
+    consts::{session_info_folder_for_session, VERSION, ZELLIJ_SOCK_DIR},
+    ipc::async_send_kill_and_await,
+    sessions::{get_resurrectable_sessions, get_sessions, session_exists, validate_session_name},
     web_authentication_tokens::create_session_token,
 };
 
@@ -192,6 +194,181 @@ pub async fn list_sessions_handler() -> Result<Json<SessionListResponse>, (Statu
             StatusCode::INTERNAL_SERVER_ERROR,
             Json("Failed to list sessions".to_string()),
         )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ConfirmSessionActionQuery {
+    confirm: Option<bool>,
+}
+
+pub async fn restart_session_handler(
+    AxumPath(session_name): AxumPath<String>,
+    Query(query): Query<ConfirmSessionActionQuery>,
+    request: Request,
+) -> Result<Json<SessionActionResponse>, (StatusCode, Json<String>)> {
+    require_write_token(&request, "restart sessions")?;
+    require_confirm(query.confirm, "restart")?;
+    validate_web_session_name(&session_name)?;
+
+    let is_live = session_exists(&session_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to check session: {:?}", e)),
+        )
+    })?;
+    if !is_live {
+        if is_resurrectable_session(&session_name) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json("Session is not live; attach it to resurrect instead".to_string()),
+            ));
+        }
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(format!("Session {:?} not found", session_name)),
+        ));
+    }
+
+    let signal_sent = send_kill_session(&session_name).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to restart session: {}", e)),
+        )
+    })?;
+    if !signal_sent {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(format!("Session {:?} not found", session_name)),
+        ));
+    }
+
+    Ok(Json(SessionActionResponse {
+        session: session_name,
+        action: "restart".to_string(),
+        live_session_signal_sent: signal_sent,
+        resurrection_data_removed: false,
+        message: "Restart requested. Reconnect to resurrect the session.".to_string(),
+    }))
+}
+
+pub async fn delete_session_handler(
+    AxumPath(session_name): AxumPath<String>,
+    Query(query): Query<ConfirmSessionActionQuery>,
+    request: Request,
+) -> Result<Json<SessionActionResponse>, (StatusCode, Json<String>)> {
+    require_write_token(&request, "delete sessions")?;
+    require_confirm(query.confirm, "delete")?;
+    validate_web_session_name(&session_name)?;
+
+    let is_live = session_exists(&session_name).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(format!("Failed to check session: {:?}", e)),
+        )
+    })?;
+    let is_resurrectable = is_resurrectable_session(&session_name);
+    if !is_live && !is_resurrectable {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(format!("Session {:?} not found", session_name)),
+        ));
+    }
+
+    let removed_before_kill = remove_resurrection_cache(&session_name)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(format!("Failed to delete session data: {}", e)),
+            )
+        })?;
+    let signal_sent = if is_live {
+        send_kill_session(&session_name).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(format!("Failed to kill session: {}", e)),
+            )
+        })?
+    } else {
+        false
+    };
+    if signal_sent {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let removed_after_kill = remove_resurrection_cache(&session_name)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(format!("Failed to delete session data: {}", e)),
+            )
+        })?;
+
+    Ok(Json(SessionActionResponse {
+        session: session_name,
+        action: "delete".to_string(),
+        live_session_signal_sent: signal_sent,
+        resurrection_data_removed: removed_before_kill || removed_after_kill,
+        message: "Session delete requested. Resurrection data was removed.".to_string(),
+    }))
+}
+
+fn require_write_token(request: &Request, action: &str) -> Result<(), (StatusCode, Json<String>)> {
+    let is_read_only = request
+        .extensions()
+        .get::<IsReadOnly>()
+        .copied()
+        .unwrap_or(IsReadOnly(true))
+        .0;
+    if is_read_only {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(format!("Read-only tokens cannot {}", action)),
+        ));
+    }
+    Ok(())
+}
+
+fn require_confirm(confirm: Option<bool>, action: &str) -> Result<(), (StatusCode, Json<String>)> {
+    if confirm == Some(true) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        Json(format!(
+            "Add ?confirm=true to confirm the session {} action",
+            action
+        )),
+    ))
+}
+
+fn validate_web_session_name(session_name: &str) -> Result<(), (StatusCode, Json<String>)> {
+    validate_session_name(session_name).map_err(|e| (StatusCode::BAD_REQUEST, Json(e)))
+}
+
+fn is_resurrectable_session(session_name: &str) -> bool {
+    get_resurrectable_sessions()
+        .iter()
+        .any(|(name, _)| name == session_name)
+}
+
+async fn remove_resurrection_cache(session_name: &str) -> io::Result<bool> {
+    match tokio::fs::remove_dir_all(session_info_folder_for_session(session_name)).await {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+async fn send_kill_session(session_name: &str) -> Result<bool, String> {
+    let path = &*ZELLIJ_SOCK_DIR.join(session_name);
+    match tokio::time::timeout(Duration::from_secs(2), async_send_kill_and_await(path)).await {
+        Ok(Ok(())) => Ok(true),
+        Ok(Err(e)) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => Ok(false),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("session did not acknowledge kill request within 2s".to_string()),
     }
 }
 

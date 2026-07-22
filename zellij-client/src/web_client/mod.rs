@@ -22,7 +22,7 @@ use std::{
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
     Router,
 };
 use tokio::runtime::Runtime;
@@ -45,10 +45,10 @@ use zellij_utils::input::{config::Config, options::Options};
 
 use authentication::auth_middleware;
 use http_handlers::{
-    create_new_client, delete_uploaded_file_handler, download_uploaded_file_handler,
-    download_uploaded_image_handler, get_static_asset, list_sessions_handler,
-    list_uploaded_images_handler, login_handler, serve_html, upload_file_handler,
-    upload_image_handler, version_handler,
+    create_new_client, delete_session_handler, delete_uploaded_file_handler,
+    download_uploaded_file_handler, download_uploaded_image_handler, get_static_asset,
+    list_sessions_handler, list_uploaded_images_handler, login_handler, restart_session_handler,
+    serve_html, upload_file_handler, upload_image_handler, version_handler,
 };
 use ipc_listener::listen_to_web_server_instructions;
 
@@ -242,6 +242,8 @@ pub async fn serve_web_client(
         .route("/ws/terminal/{session}", any(ws_handler_terminal))
         .route("/session", post(create_new_client))
         .route("/sessions", get(list_sessions_handler))
+        .route("/sessions/{session}", delete(delete_session_handler))
+        .route("/sessions/{session}/restart", post(restart_session_handler))
         .route(
             "/upload/image",
             post(upload_image_handler).layer(DefaultBodyLimit::max(20 * 1024 * 1024)),
