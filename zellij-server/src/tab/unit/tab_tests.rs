@@ -15744,6 +15744,57 @@ pub fn page_scroll_down_by_pane_id() {
 }
 
 #[test]
+pub fn scrolled_pane_stays_put_when_output_buffer_fills() {
+    // A pane that streams output continuously (e.g. a normal-buffer TUI)
+    // while the user is scrolled up reading history must not yank the reader
+    // to the bottom once the pending-vte buffer fills. The buffered output is
+    // flushed to bound memory, but the scroll position is restored so the same
+    // content stays in view.
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, true);
+    let pane_id = PaneId::Terminal(1);
+    assert!(tab.has_pane_with_pid(&pane_id));
+
+    // Fill the scrollback with more lines than fit on screen.
+    let mut content = String::new();
+    for i in 0..200 {
+        content.push_str(&format!("line {}\r\n", i));
+    }
+    tab.handle_pty_bytes(1, content.into_bytes()).unwrap();
+
+    // The reader scrolls up into the scrollback.
+    for _ in 0..5 {
+        tab.scroll_up_by_pane_id(pane_id);
+    }
+    assert!(
+        tab.get_active_pane(1).unwrap().is_scrolled(),
+        "pane should be scrolled after scrolling up"
+    );
+    let anchor = tab.get_active_pane(1).unwrap().get_line_number();
+
+    // The application keeps streaming: feed enough separate vte events to fill
+    // the pending buffer and trigger a flush. Carriage returns add no new lines
+    // so the anchor position is exactly recoverable.
+    for _ in 0..crate::tab::MAX_PENDING_VTE_EVENTS {
+        tab.handle_pty_bytes(1, vec![b'\r']).unwrap();
+    }
+
+    // The flush must not have snapped the reader to the bottom.
+    assert!(
+        tab.get_active_pane(1).unwrap().is_scrolled(),
+        "reader was yanked to the bottom when the output buffer filled"
+    );
+    assert_eq!(
+        tab.get_active_pane(1).unwrap().get_line_number(),
+        anchor,
+        "scroll position drifted after the output buffer was flushed"
+    );
+}
+
+#[test]
 pub fn half_page_scroll_up_by_pane_id() {
     let size = Size {
         cols: 121,

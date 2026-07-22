@@ -1068,6 +1068,15 @@ impl Pane for TerminalPane {
     fn terminal_emulator_wants_mouse(&self) -> bool {
         self.grid.mouse_tracking != crate::panes::grid::MouseTracking::Off
     }
+    fn terminal_emulator_uses_sgr_normal_mouse_tracking(&self) -> bool {
+        matches!(
+            (&self.grid.mouse_mode, &self.grid.mouse_tracking),
+            (
+                crate::panes::grid::MouseMode::Sgr,
+                crate::panes::grid::MouseTracking::Normal
+            )
+        )
+    }
 }
 
 impl TerminalPane {

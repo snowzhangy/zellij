@@ -689,6 +689,9 @@ pub trait Pane {
     fn terminal_emulator_wants_mouse(&self) -> bool {
         false
     }
+    fn terminal_emulator_uses_sgr_normal_mouse_tracking(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2711,12 +2714,27 @@ impl Tab {
             // If the pane is scrolled buffer the vte events
             if terminal_output.is_scrolled() {
                 self.pending_vte_events.entry(pid).or_default().push(bytes);
-                if let Some(evs) = self.pending_vte_events.get(&pid) {
-                    // Reset scroll - and process all pending events for this pane
-                    if evs.len() >= MAX_PENDING_VTE_EVENTS {
-                        terminal_output.clear_scroll();
-                        self.process_pending_vte_events(pid)
-                            .with_context(err_context)?;
+                let should_flush = self
+                    .pending_vte_events
+                    .get(&pid)
+                    .map(|evs| evs.len() >= MAX_PENDING_VTE_EVENTS)
+                    .unwrap_or(false);
+                if should_flush {
+                    // The buffer is full but the user is still reading
+                    // scrollback. Flush the buffered output to bound memory
+                    // and keep the grid correct, but do NOT yank them to the
+                    // bottom: record the absolute scroll position, apply the
+                    // events, then scroll back up to the same content. An
+                    // application that streams output continuously (e.g. a
+                    // normal-buffer TUI) would otherwise snap the reader to
+                    // the bottom every time the buffer fills, making the
+                    // scrollback impossible to read while it works.
+                    let anchor = terminal_output.get_line_number();
+                    terminal_output.clear_scroll();
+                    self.process_pending_vte_events(pid)
+                        .with_context(err_context)?;
+                    if let Some(anchor) = anchor {
+                        self.restore_scroll_position_after_flush(pid, anchor);
                     }
                 }
                 return Ok(());
@@ -2754,6 +2772,22 @@ impl Tab {
             }
         }
         Ok(())
+    }
+    /// After flushing buffered output into a scrolled pane (which resets it to
+    /// the bottom), scroll it back up so the same content the reader was
+    /// looking at stays in view. `anchor` is the pane's absolute scrollback
+    /// line number captured before the flush; the freshly-appended output only
+    /// grows the buffer below that line, so returning to it keeps the view put.
+    fn restore_scroll_position_after_flush(&mut self, pid: u32, anchor: usize) {
+        if let Some(pane) = self.get_pane_with_id_mut(PaneId::Terminal(pid)) {
+            if let Some(current) = pane.get_line_number() {
+                let lines_to_scroll_up = current.saturating_sub(anchor);
+                if lines_to_scroll_up > 0 {
+                    // fictitious client id: terminal panes ignore it for scroll
+                    pane.scroll_up(lines_to_scroll_up, 1);
+                }
+            }
+        }
     }
     /// Deliver a forwarded host reply (or cache-fallback synthesis,
     /// or a locally-answered query payload) to a pane that is currently
@@ -4459,6 +4493,30 @@ impl Tab {
         }
     }
     pub fn scroll_active_terminal_up(&mut self, client_id: ClientId) {
+        // A full-screen app on the alternate screen has no Zellij scrollback, so
+        // scroll_up would be a no-op. If it is reading mouse input, forward a
+        // wheel event so it scrolls its own view instead. This mirrors what a
+        // physical mouse wheel already does on such panes and is what mobile/web
+        // finger scroll (ViewportScroll -> ScrollUp) relies on.
+        let forwarded = self
+            .get_active_pane_or_floating_pane_mut(client_id)
+            .filter(|active_pane| active_pane.is_alternate_mode_active())
+            .and_then(|active_pane| {
+                active_pane
+                    .mouse_scroll_up(&Position::new(0, 0))
+                    .map(|event| (active_pane.pid(), event))
+            });
+        if let Some((pane_id, mouse_event)) = forwarded {
+            let _ = self.write_to_pane_id(
+                &None,
+                mouse_event.into_bytes(),
+                false,
+                pane_id,
+                Some(client_id),
+                None,
+            );
+            return;
+        }
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
             active_pane.scroll_up(1, client_id);
         }
@@ -4475,6 +4533,29 @@ impl Tab {
 
     pub fn scroll_active_terminal_down(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to scroll down active pane for client {client_id}");
+
+        // See scroll_active_terminal_up: forward a wheel event to full-screen
+        // apps on the alternate screen instead of the no-op scroll_down.
+        let forwarded = self
+            .get_active_pane_or_floating_pane_mut(client_id)
+            .filter(|active_pane| active_pane.is_alternate_mode_active())
+            .and_then(|active_pane| {
+                active_pane
+                    .mouse_scroll_down(&Position::new(0, 0))
+                    .map(|event| (active_pane.pid(), event))
+            });
+        if let Some((pane_id, mouse_event)) = forwarded {
+            self.write_to_pane_id(
+                &None,
+                mouse_event.into_bytes(),
+                false,
+                pane_id,
+                Some(client_id),
+                None,
+            )
+            .with_context(err_context)?;
+            return Ok(());
+        }
 
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
             active_pane.scroll_down(1, client_id);
