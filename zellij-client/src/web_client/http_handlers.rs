@@ -1,8 +1,10 @@
 use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
+use crate::web_client::control_message::SetConfigPayload;
 use crate::web_client::types::{
-    AppState, CreateClientIdResponse, ImageUploadListItem, ImageUploadListResponse,
-    ImageUploadResponse, LoginRequest, LoginResponse, SessionActionResponse, SessionListItem,
-    SessionListResponse, SessionStatus,
+    record_pending_welcome_session, AppState, CreateClientIdResponse, ImageUploadListItem,
+    ImageUploadListResponse, ImageUploadResponse, LoginRequest, LoginResponse,
+    MobileSessionListResponse, SessionActionResponse, SessionListItem, SessionListResponse,
+    SessionQuery, SessionStatus,
 };
 use crate::web_client::utils::{get_mime_type, parse_cookies};
 use axum::{
@@ -24,7 +26,10 @@ use uuid::Uuid;
 use zellij_utils::{
     consts::{session_info_folder_for_session, VERSION, ZELLIJ_SOCK_DIR},
     ipc::async_send_kill_and_await,
-    sessions::{get_resurrectable_sessions, get_sessions, session_exists, validate_session_name},
+    sessions::{
+        generate_unique_session_name, get_resurrectable_sessions, get_sessions, session_exists,
+        validate_session_name,
+    },
     web_authentication_tokens::create_session_token,
 };
 
@@ -129,6 +134,7 @@ pub async fn login_handler(
 
 pub async fn create_new_client(
     State(state): State<AppState>,
+    Query(params): Query<SessionQuery>,
     request: axum::extract::Request,
 ) -> Result<Json<CreateClientIdResponse>, (StatusCode, impl IntoResponse)> {
     // Extract is_read_only from request extensions (set by auth middleware)
@@ -147,6 +153,17 @@ pub async fn create_new_client(
             Json("Missing session info".to_string()),
         ))?;
 
+    let session_name = match params.session.filter(|name| !name.is_empty()) {
+        Some(session_name) => session_name,
+        None => generate_unique_session_name().ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json("Failed to generate unique session name".to_string()),
+        ))?,
+    };
+    if params.welcome.unwrap_or(true) {
+        record_pending_welcome_session(&state.pending_welcome_sessions, &session_name);
+    }
+
     let web_client_id = String::from(Uuid::new_v4());
     let os_input = state
         .client_os_api_factory
@@ -160,14 +177,24 @@ pub async fn create_new_client(
         session_token_hash.0,
     );
 
+    let config = SetConfigPayload::from(&*state.config.lock().unwrap());
+
     Ok(Json(CreateClientIdResponse {
         web_client_id,
         is_read_only,
+        session_name,
+        config,
     }))
 }
 
-pub async fn list_sessions_handler() -> Result<Json<SessionListResponse>, (StatusCode, Json<String>)>
-{
+pub async fn list_sessions_handler(State(state): State<AppState>) -> Json<SessionListResponse> {
+    let mut sessions = state.session_manager.list_sessions();
+    sessions.sort_by(|left, right| left.name.cmp(&right.name));
+    Json(SessionListResponse { sessions })
+}
+
+pub async fn list_mobile_sessions_handler(
+) -> Result<Json<MobileSessionListResponse>, (StatusCode, Json<String>)> {
     match get_sessions() {
         Ok(sessions) => {
             let mut session_items: Vec<SessionListItem> = sessions
@@ -186,7 +213,7 @@ pub async fn list_sessions_handler() -> Result<Json<SessionListResponse>, (Statu
                 }
             }
             session_items.sort_by(|left, right| left.name.cmp(&right.name));
-            Ok(Json(SessionListResponse {
+            Ok(Json(MobileSessionListResponse {
                 sessions: session_items,
             }))
         },

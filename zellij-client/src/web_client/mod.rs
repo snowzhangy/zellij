@@ -47,8 +47,9 @@ use authentication::auth_middleware;
 use http_handlers::{
     create_new_client, delete_session_handler, delete_uploaded_file_handler,
     download_uploaded_file_handler, download_uploaded_image_handler, get_static_asset,
-    list_sessions_handler, list_uploaded_images_handler, login_handler, restart_session_handler,
-    serve_html, upload_file_handler, upload_image_handler, version_handler,
+    list_mobile_sessions_handler, list_sessions_handler, list_uploaded_images_handler,
+    login_handler, restart_session_handler, serve_html, upload_file_handler, upload_image_handler,
+    version_handler,
 };
 use ipc_listener::listen_to_web_server_instructions;
 
@@ -220,6 +221,7 @@ pub async fn serve_web_client(
         session_manager,
         client_os_api_factory,
         is_https,
+        pending_welcome_sessions: Arc::new(Mutex::new(std::collections::VecDeque::new())),
     };
 
     tokio::spawn({
@@ -241,7 +243,8 @@ pub async fn serve_web_client(
         .route("/ws/terminal", any(ws_handler_terminal))
         .route("/ws/terminal/{session}", any(ws_handler_terminal))
         .route("/session", post(create_new_client))
-        .route("/sessions", get(list_sessions_handler))
+        .route("/session-list", get(list_sessions_handler))
+        .route("/sessions", get(list_mobile_sessions_handler))
         .route("/sessions/{session}", delete(delete_session_handler))
         .route("/sessions/{session}/restart", post(restart_session_handler))
         .route(
@@ -289,15 +292,34 @@ pub async fn serve_web_client(
             }
         }));
 
+    if let Err(e) = listener.set_nonblocking(true) {
+        log::error!("Failed to set web server listener to non-blocking: {}", e);
+        return;
+    }
+
     match rustls_config {
         Some(rustls_config) => {
-            let _ = axum_server::from_tcp_rustls(listener, rustls_config)
+            let server = match axum_server::from_tcp_rustls(listener, rustls_config) {
+                Ok(server) => server,
+                Err(e) => {
+                    log::error!("Failed to create TLS web server from listener: {}", e);
+                    return;
+                },
+            };
+            let _ = server
                 .handle(server_handle)
                 .serve(app.into_make_service())
                 .await;
         },
         None => {
-            let _ = axum_server::from_tcp(listener)
+            let server = match axum_server::from_tcp(listener) {
+                Ok(server) => server,
+                Err(e) => {
+                    log::error!("Failed to create web server from listener: {}", e);
+                    return;
+                },
+            };
+            let _ = server
                 .handle(server_handle)
                 .serve(app.into_make_service())
                 .await;

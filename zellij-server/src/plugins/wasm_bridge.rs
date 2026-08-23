@@ -11,7 +11,7 @@ use crate::plugins::watch_filesystem::watch_filesystem;
 use crate::plugins::zellij_exports::{wasi_read_string, wasi_write_object};
 use highway::{HighwayHash, PortableHash};
 use log::info;
-use notify_debouncer_full::{notify::RecommendedWatcher, Debouncer, FileIdMap};
+use notify_debouncer_full::{notify::RecommendedWatcher, Debouncer, RecommendedCache};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
@@ -23,7 +23,7 @@ use url::Url;
 use wasmi::{Engine, Module};
 use zellij_utils::consts::{ZELLIJ_CACHE_DIR, ZELLIJ_SESSION_CACHE_DIR, ZELLIJ_TMP_DIR};
 use zellij_utils::data::{
-    FloatingPaneCoordinates, InputMode, LayoutInfo, LayoutWithError, PaneContents,
+    FloatingPaneCoordinates, InputMode, KeybindsVec, LayoutInfo, LayoutWithError, PaneContents,
     PaneRenderReport, PermissionStatus, PermissionType, PipeMessage, PipeSource,
 };
 use zellij_utils::downloader::Downloader;
@@ -184,7 +184,7 @@ pub struct WasmBridge {
     loading_plugins: HashSet<(PluginId, RunPlugin)>, // tracks loading plugins without handles
     pending_plugin_reloads: HashSet<RunPlugin>,
     path_to_default_shell: PathBuf,
-    watcher: Option<Debouncer<RecommendedWatcher, FileIdMap>>,
+    watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
     zellij_cwd: PathBuf,
     session_env_vars: std::collections::BTreeMap<String, String>,
     default_shell: Option<TerminalAction>,
@@ -499,17 +499,6 @@ impl WasmBridge {
             plugin_map.remove_plugins(pid).into_iter().collect()
         };
 
-        // Check if any removed plugin was subscribed to ANSI pane render
-        let was_subscribed_to_ansi =
-            plugins_to_cleanup
-                .iter()
-                .any(|((_, _), (_, subscriptions, _))| {
-                    subscriptions
-                        .lock()
-                        .unwrap()
-                        .contains(&EventType::PaneRenderReportWithAnsi)
-                });
-
         // Schedule cleanup on each plugin's pinned thread
         for ((plugin_id, client_id), (running_plugin, subscriptions, workers)) in plugins_to_cleanup
         {
@@ -588,11 +577,6 @@ impl WasmBridge {
         let _ = self
             .senders
             .send_to_background_jobs(BackgroundJob::ReportPluginList(plugin_list));
-
-        // If any unloaded plugin was subscribed to ANSI pane content, re-check remaining plugins
-        if was_subscribed_to_ansi {
-            self.notify_screen_of_ansi_subscription_change();
-        }
 
         Ok(())
     }
@@ -706,6 +690,14 @@ impl WasmBridge {
             new_plugins.insert(plugin_id);
         }
         for plugin_id in new_plugins {
+            if self
+                .plugin_map
+                .lock()
+                .unwrap()
+                .contains(plugin_id, client_id)
+            {
+                continue;
+            }
             let Some(run_plugin) = self.run_plugin_of_plugin_id(plugin_id).map(|r| r.clone())
             else {
                 log::error!("Failed to find plugin with id: {}", plugin_id);
@@ -1289,6 +1281,7 @@ impl WasmBridge {
                     .map(|prev_pane_contents| {
                         prev_pane_contents.viewport != new_pane_contents.viewport
                             || prev_pane_contents.selected_text != new_pane_contents.selected_text
+                            || prev_pane_contents.cursor != new_pane_contents.cursor
                     })
                     .unwrap_or(true);
                 if has_changed {
@@ -1307,7 +1300,6 @@ impl WasmBridge {
         pane_render_report: PaneRenderReport,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
-        // Plain content (existing behavior)
         let changed_panes_per_client = self.get_changed_panes_per_client(
             &pane_render_report.all_pane_contents,
             self.previous_pane_render_report
@@ -1319,45 +1311,8 @@ impl WasmBridge {
             self.update_plugins(updates, shutdown_sender.clone())?;
         }
 
-        // ANSI content (new behavior)
-        if !pane_render_report.all_pane_contents_with_ansi.is_empty() {
-            let changed_ansi_panes_per_client = self.get_changed_panes_per_client(
-                &pane_render_report.all_pane_contents_with_ansi,
-                self.previous_pane_render_report
-                    .as_ref()
-                    .map(|r| &r.all_pane_contents_with_ansi),
-            );
-            for (client_id, client_panes) in changed_ansi_panes_per_client {
-                let updates = vec![(
-                    None,
-                    Some(client_id),
-                    Event::PaneRenderReportWithAnsi(client_panes),
-                )];
-                self.update_plugins(updates, shutdown_sender.clone())?;
-            }
-        }
-
         self.previous_pane_render_report = Some(pane_render_report);
         Ok(())
-    }
-
-    pub fn notify_screen_of_ansi_subscription_change(&self) {
-        let any_plugin_needs_ansi = {
-            let mut plugin_map = self.plugin_map.lock().unwrap();
-            plugin_map
-                .running_plugins_and_subscriptions()
-                .iter()
-                .any(|(_, _, _, subs)| {
-                    subs.lock()
-                        .unwrap()
-                        .contains(&EventType::PaneRenderReportWithAnsi)
-                })
-        };
-        let _ = self
-            .senders
-            .send_to_screen(ScreenInstruction::PluginSubscribedToAnsiPaneContents(
-                any_plugin_needs_ansi,
-            ));
     }
 
     pub fn notify_screen_of_background_plugin_subscriptions(
@@ -1397,12 +1352,21 @@ impl WasmBridge {
                 .map(|(_, _, rp, _)| rp.lock().unwrap().store.data().keybinds.to_keybinds_vec())
         };
         if let Some(keybinds) = keybinds {
-            let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
-                Some(plugin_id),
-                Some(client_id),
-                Event::InitialKeybinds(keybinds),
-            )]));
+            self.send_keybinds_payload_to_plugin(plugin_id, client_id, keybinds);
         }
+    }
+
+    fn send_keybinds_payload_to_plugin(
+        &self,
+        plugin_id: PluginId,
+        client_id: ClientId,
+        keybinds: KeybindsVec,
+    ) {
+        let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+            Some(plugin_id),
+            Some(client_id),
+            Event::InitialKeybinds(keybinds),
+        )]));
     }
 
     pub fn cleanup(&mut self) {
@@ -1496,8 +1460,15 @@ impl WasmBridge {
             });
         }
         // Send InitialKeybinds to subscribed plugins after reconfiguration
-        for plugin_id in plugins_subscribed_to_initial_keybinds {
-            self.send_initial_keybinds_to_plugin(plugin_id, client_id);
+        if let Some(keybinds) = keybinds.as_ref() {
+            let keybinds_payload = keybinds.to_keybinds_vec();
+            for plugin_id in plugins_subscribed_to_initial_keybinds {
+                self.send_keybinds_payload_to_plugin(
+                    plugin_id,
+                    client_id,
+                    keybinds_payload.clone(),
+                );
+            }
         }
         Ok(())
     }
@@ -2102,11 +2073,12 @@ fn check_event_permission(
         | Event::AvailableLayoutInfo(..)
         | Event::PluginConfigurationChanged(..)
         | Event::HighlightClicked { .. }
+        | Event::SoftKeyboardVisibilityChanged(..)
+        | Event::HintText(..)
+        | Event::ActivePaneScroll(..)
         | Event::InputReceived => PermissionType::ReadApplicationState,
         Event::WebServerStatus(..) => PermissionType::StartWebServer,
-        Event::PaneRenderReport(..) | Event::PaneRenderReportWithAnsi(..) => {
-            PermissionType::ReadPaneContents
-        },
+        Event::PaneRenderReport(..) => PermissionType::ReadPaneContents,
         Event::UserAction(..) => PermissionType::InterceptInput,
         _ => return (PermissionStatus::Granted, None),
     };
@@ -2138,7 +2110,9 @@ pub fn apply_event_to_plugin(
         (PermissionStatus::Granted, _) => {
             let mut event = event.clone();
             if let Event::ModeUpdate(mode_info) = &mut event {
-                mode_info.base_mode = Some(running_plugin.store.data().default_mode);
+                if mode_info.base_mode.is_none() {
+                    mode_info.base_mode = Some(running_plugin.store.data().default_mode);
+                }
                 if plugin_subscriptions.contains(&EventType::InitialKeybinds) {
                     // Plugin caches keybindings via InitialKeybinds — send lightweight ModeUpdate
                     mode_info.keybinds = vec![];

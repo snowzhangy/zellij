@@ -25,6 +25,7 @@ pub fn get_mime_type(ext: Option<&str>) -> &'static str {
             "json" => "application/json",
             "txt" | "md" | "log" => "text/plain",
             "csv" => "text/csv",
+            "webmanifest" => "application/manifest+json",
             _ => "text/plain",
         },
     }
