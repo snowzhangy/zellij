@@ -36,6 +36,10 @@ fn server_message_name(msg: &ServerToClientMsg) -> String {
         ServerToClientMsg::ForwardQueryToHost { .. } => "ForwardQueryToHost",
         ServerToClientMsg::MobileState { .. } => "MobileState",
         ServerToClientMsg::EmitNestedSessionFrame { .. } => "EmitNestedSessionFrame",
+        ServerToClientMsg::TabSnapshot { .. } => "TabSnapshot",
+        ServerToClientMsg::TabUpdate { .. } => "TabUpdate",
+        ServerToClientMsg::TabInventoryBatch { .. } => "TabInventoryBatch",
+        ServerToClientMsg::SessionCapabilities { .. } => "SessionCapabilities",
     }
     .to_string()
 }
