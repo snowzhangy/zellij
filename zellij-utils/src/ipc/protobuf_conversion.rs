@@ -8,27 +8,29 @@ use crate::{
         ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg, DetachSessionMsg,
         EmitNestedSessionFrameMsg, ExitMsg, ExitReason as ProtoExitReason,
         FailedToStartWebServerMsg, FirstClientConnectedMsg, ForegroundColorMsg,
-        ForwardQueryToHostMsg, ForwardedReplyFromHostMsg, HostTerminalFocusChangedMsg,
-        HostTerminalThemeChangedMsg,
+        ForwardQueryToHostMsg, ForwardedReplyFromHostMsg, GoToTabByIdMsg,
+        HostTerminalFocusChangedMsg, HostTerminalThemeChangedMsg,
         HostTerminalThemeIndication as ProtoHostTerminalThemeIndication,
         InputMode as ProtoInputMode, KeyMsg, KillSessionMsg, KittyGraphicsSupportMsg,
         LayoutMetadata as ProtoLayoutMetadata, LogErrorMsg, LogMsg, MobileActivePaneMsg,
         MobilePaneMsg, MobileRenderPrefsMsg, MobileSessionMsg, MobileSizeMsg, MobileStateMsg,
         MobileTabMsg, NestedSessionFrameFromHostMsg, PaneMetadata as ProtoPaneMetadata,
         PaneRenderUpdateMsg, QueryTerminalSizeMsg, RenamedSessionMsg, RenderMsg,
-        RequestSessionListMsg, ServerToClientMsg as ProtoServerToClientMsg,
+        RequestSessionListMsg, RequestTabSnapshotMsg, ServerToClientMsg as ProtoServerToClientMsg,
+        SessionCapabilities as ProtoSessionCapabilities, SessionCapabilitiesMsg,
         SetMobileRenderPreferencesMsg, SetSoftKeyboardMsg, SixelSupportMsg,
         SoftKeyboardVisibilityChangedMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
-        SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
-        TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
-        UnblockInputThreadMsg, WebServerStartedMsg,
+        SubscribedPaneClosedMsg, SwitchSessionMsg, TabInventoryBatchMsg,
+        TabMetadata as ProtoTabMetadata, TabSnapshotMsg, TabUpdateMsg, TerminalPixelDimensionsMsg,
+        TerminalResizeMsg, UnblockCliPipeInputMsg, UnblockInputThreadMsg, WebServerStartedMsg,
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
     ipc::{
         ClientToServerMsg, ColorRegister, ExitReason, MobileActivePanePayload, MobilePanePayload,
         MobileRenderPrefsPayload, MobileSessionPayload, MobileSizePayload, MobileStatePayload,
-        MobileTabPayload, PaneReference, PixelDimensions, ServerToClientMsg,
+        MobileTabPayload, PaneReference, PixelDimensions, ServerToClientMsg, SessionCapabilities,
+        TabInventoryBatch, TabSnapshot, TabSnapshotTab, TabUpdate,
     },
 };
 use std::collections::BTreeMap;
@@ -85,9 +87,11 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
             ClientToServerMsg::AttachWatcherClient {
                 terminal_size,
                 is_web_client,
+                inventory_only,
             } => client_to_server_msg::Message::AttachWatcherClient(AttachWatcherClientMsg {
                 terminal_size: Some(terminal_size.into()),
                 is_web_client,
+                inventory_only,
             }),
             ClientToServerMsg::Action {
                 action,
@@ -185,6 +189,14 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                     HostTerminalFocusChangedMsg { focused },
                 )
             },
+            ClientToServerMsg::RequestTabSnapshot { session_id } => {
+                client_to_server_msg::Message::RequestTabSnapshot(RequestTabSnapshotMsg {
+                    session_id,
+                })
+            },
+            ClientToServerMsg::GoToTabById { session_id, tab_id } => {
+                client_to_server_msg::Message::GoToTabById(GoToTabByIdMsg { session_id, tab_id })
+            },
         };
 
         ProtoClientToServerMsg {
@@ -266,6 +278,7 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                         .ok_or_else(|| anyhow::anyhow!("Missing terminal_size"))?
                         .try_into()?,
                     is_web_client: attach_watcher.is_web_client,
+                    inventory_only: attach_watcher.inventory_only,
                 })
             },
             Some(client_to_server_msg::Message::Action(action)) => Ok(ClientToServerMsg::Action {
@@ -359,6 +372,17 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
             Some(client_to_server_msg::Message::HostTerminalFocusChanged(msg)) => {
                 Ok(ClientToServerMsg::HostTerminalFocusChanged {
                     focused: msg.focused,
+                })
+            },
+            Some(client_to_server_msg::Message::RequestTabSnapshot(msg)) => {
+                Ok(ClientToServerMsg::RequestTabSnapshot {
+                    session_id: msg.session_id,
+                })
+            },
+            Some(client_to_server_msg::Message::GoToTabById(msg)) => {
+                Ok(ClientToServerMsg::GoToTabById {
+                    session_id: msg.session_id,
+                    tab_id: msg.tab_id,
                 })
             },
             None => Err(anyhow!("Empty ClientToServerMsg message")),
@@ -459,6 +483,26 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
             },
             ServerToClientMsg::MobileState { payload } => {
                 server_to_client_msg::Message::MobileState(mobile_state_payload_to_proto(payload))
+            },
+            ServerToClientMsg::TabSnapshot { snapshot } => {
+                server_to_client_msg::Message::TabSnapshot(TabSnapshotMsg {
+                    snapshot: Some(snapshot.into()),
+                })
+            },
+            ServerToClientMsg::TabUpdate { update } => {
+                server_to_client_msg::Message::TabUpdate(TabUpdateMsg {
+                    update: Some(update.into()),
+                })
+            },
+            ServerToClientMsg::TabInventoryBatch { batch } => {
+                server_to_client_msg::Message::TabInventoryBatch(TabInventoryBatchMsg {
+                    batch: Some(batch.into()),
+                })
+            },
+            ServerToClientMsg::SessionCapabilities { capabilities } => {
+                server_to_client_msg::Message::SessionCapabilities(SessionCapabilitiesMsg {
+                    capabilities: Some(capabilities.into()),
+                })
             },
         };
 
@@ -704,6 +748,38 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
             Some(server_to_client_msg::Message::MobileState(msg)) => {
                 Ok(ServerToClientMsg::MobileState {
                     payload: mobile_state_payload_from_proto(msg),
+                })
+            },
+            Some(server_to_client_msg::Message::TabSnapshot(msg)) => {
+                Ok(ServerToClientMsg::TabSnapshot {
+                    snapshot: msg
+                        .snapshot
+                        .ok_or_else(|| anyhow!("Missing tab snapshot"))?
+                        .try_into()?,
+                })
+            },
+            Some(server_to_client_msg::Message::TabUpdate(msg)) => {
+                Ok(ServerToClientMsg::TabUpdate {
+                    update: msg
+                        .update
+                        .ok_or_else(|| anyhow!("Missing tab update"))?
+                        .try_into()?,
+                })
+            },
+            Some(server_to_client_msg::Message::TabInventoryBatch(msg)) => {
+                Ok(ServerToClientMsg::TabInventoryBatch {
+                    batch: msg
+                        .batch
+                        .ok_or_else(|| anyhow!("Missing tab inventory batch"))?
+                        .try_into()?,
+                })
+            },
+            Some(server_to_client_msg::Message::SessionCapabilities(msg)) => {
+                Ok(ServerToClientMsg::SessionCapabilities {
+                    capabilities: msg
+                        .capabilities
+                        .ok_or_else(|| anyhow!("Missing session capabilities"))?
+                        .try_into()?,
                 })
             },
             None => Err(anyhow!("Empty ServerToClientMsg message")),
@@ -3744,6 +3820,185 @@ impl TryFrom<crate::client_server_contract::client_server_contract::PaneId>
             PaneType::Terminal(id) => Ok(crate::data::PaneId::Terminal(id)),
             PaneType::Plugin(id) => Ok(crate::data::PaneId::Plugin(id)),
         }
+    }
+}
+
+impl From<TabSnapshot> for crate::client_server_contract::client_server_contract::TabSnapshot {
+    fn from(snapshot: TabSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id,
+            sequence: snapshot.sequence,
+            tabs: snapshot.tabs.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<TabSnapshotTab>
+    for crate::client_server_contract::client_server_contract::TabSnapshotTab
+{
+    fn from(tab: TabSnapshotTab) -> Self {
+        Self {
+            tab_id: tab.tab_id as u64,
+            index: tab.index as u32,
+            name: tab.name,
+            active: tab.active,
+            panes: tab.pane_ids.into_iter().map(Into::into).collect(),
+            has_bell: tab.has_bell,
+            last_activity_at_unix_ms: tab.last_activity_at_unix_ms,
+        }
+    }
+}
+
+impl From<TabUpdate> for crate::client_server_contract::client_server_contract::TabUpdate {
+    fn from(update: TabUpdate) -> Self {
+        Self {
+            session_id: update.session_id,
+            sequence: update.sequence,
+            tab_id: update.tab_id as u64,
+            index: update.index.map(|v| v as u32),
+            name: update.name,
+            active: update.active,
+            panes: update
+                .pane_ids
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            closed: update.closed,
+        }
+    }
+}
+
+impl From<TabInventoryBatch>
+    for crate::client_server_contract::client_server_contract::TabInventoryBatch
+{
+    fn from(batch: TabInventoryBatch) -> Self {
+        Self {
+            session_id: batch.session_id,
+            sequence: batch.sequence,
+            upserts: batch.upserts.into_iter().map(Into::into).collect(),
+            closed_tab_ids: batch
+                .closed_tab_ids
+                .into_iter()
+                .map(|id| id as u64)
+                .collect(),
+        }
+    }
+}
+
+impl From<SessionCapabilities> for ProtoSessionCapabilities {
+    fn from(capabilities: SessionCapabilities) -> Self {
+        Self {
+            session_id: capabilities.session_id,
+            session_name: capabilities.session_name,
+            protocol_version: capabilities.protocol_version,
+            capabilities: capabilities.capabilities,
+        }
+    }
+}
+
+impl TryFrom<crate::client_server_contract::client_server_contract::TabSnapshot> for TabSnapshot {
+    type Error = anyhow::Error;
+
+    fn try_from(
+        snapshot: crate::client_server_contract::client_server_contract::TabSnapshot,
+    ) -> Result<Self> {
+        Ok(Self {
+            session_id: snapshot.session_id,
+            sequence: snapshot.sequence,
+            tabs: snapshot
+                .tabs
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+impl TryFrom<crate::client_server_contract::client_server_contract::TabSnapshotTab>
+    for TabSnapshotTab
+{
+    type Error = anyhow::Error;
+
+    fn try_from(
+        tab: crate::client_server_contract::client_server_contract::TabSnapshotTab,
+    ) -> Result<Self> {
+        Ok(Self {
+            tab_id: tab.tab_id as usize,
+            index: tab.index as usize,
+            name: tab.name,
+            active: tab.active,
+            has_bell: tab.has_bell,
+            last_activity_at_unix_ms: tab.last_activity_at_unix_ms,
+            pane_ids: tab
+                .panes
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
+impl TryFrom<crate::client_server_contract::client_server_contract::TabUpdate> for TabUpdate {
+    type Error = anyhow::Error;
+
+    fn try_from(
+        update: crate::client_server_contract::client_server_contract::TabUpdate,
+    ) -> Result<Self> {
+        Ok(Self {
+            session_id: update.session_id,
+            sequence: update.sequence,
+            tab_id: update.tab_id as usize,
+            index: update.index.map(|v| v as usize),
+            name: update.name,
+            active: update.active,
+            pane_ids: Some(
+                update
+                    .panes
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_>>()?,
+            ),
+            closed: update.closed,
+        })
+    }
+}
+
+impl TryFrom<crate::client_server_contract::client_server_contract::TabInventoryBatch>
+    for TabInventoryBatch
+{
+    type Error = anyhow::Error;
+
+    fn try_from(
+        batch: crate::client_server_contract::client_server_contract::TabInventoryBatch,
+    ) -> Result<Self> {
+        Ok(Self {
+            session_id: batch.session_id,
+            sequence: batch.sequence,
+            upserts: batch
+                .upserts
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_>>()?,
+            closed_tab_ids: batch
+                .closed_tab_ids
+                .into_iter()
+                .map(|id| id as usize)
+                .collect(),
+        })
+    }
+}
+
+impl TryFrom<ProtoSessionCapabilities> for SessionCapabilities {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ProtoSessionCapabilities) -> Result<Self> {
+        Ok(Self {
+            session_id: value.session_id,
+            session_name: value.session_name,
+            protocol_version: value.protocol_version,
+            capabilities: value.capabilities,
+        })
     }
 }
 

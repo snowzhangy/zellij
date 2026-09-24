@@ -57,6 +57,7 @@ pub fn spawn_new_session(
 
 pub fn create_first_message(
     is_read_only: bool,
+    inventory_only: bool,
     config_file_path: Option<PathBuf>,
     client_attributes: ClientAttributes,
     mut config_opts: Options,
@@ -82,11 +83,12 @@ pub fn create_first_message(
     config_opts.web_sharing = Some(WebSharing::On);
 
     let is_web_client = true;
-    if is_read_only {
+    if inventory_only || is_read_only {
         // read only clients attach as watchers
         ClientToServerMsg::AttachWatcherClient {
             terminal_size: client_attributes.size,
             is_web_client,
+            inventory_only,
         }
     } else if should_create_session {
         config_opts.web_server = Some(true);

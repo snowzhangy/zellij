@@ -54,6 +54,48 @@ mod web_client_tests {
         }
     }
 
+    #[test]
+    fn stable_tab_controls_and_inventory_use_mobile_json_shape() {
+        let go_to_tab = serde_json::json!({
+            "web_client_id": "abc",
+            "payload": {
+                "type": "GoToTabById",
+                "session_id": "session-1",
+                "tab_id": 42,
+            }
+        });
+        let parsed: WebClientToWebServerControlMessage =
+            serde_json::from_value(go_to_tab).expect("parse stable tab command");
+        match parsed.payload {
+            WebClientToWebServerControlMessagePayload::GoToTabById(payload) => {
+                assert_eq!(payload.session_id, "session-1");
+                assert_eq!(payload.tab_id, 42);
+            },
+            other => panic!("expected GoToTabById, got {:?}", other),
+        }
+
+        let capabilities = serde_json::to_value(WebServerToWebClientControlMessage::Capabilities(
+            crate::web_client::control_message::CapabilitiesPayload {
+                protocol_version: 1,
+                server_version: "0.45".to_owned(),
+                capabilities: vec![
+                    "tab_inventory_v1".to_owned(),
+                    "tab_switch_by_id_v1".to_owned(),
+                ],
+                session_id: Some("session-1".to_owned()),
+                session_name: Some("work".to_owned()),
+            },
+        ))
+        .expect("serialize capabilities");
+        assert_eq!(capabilities["type"], "Capabilities");
+        assert_eq!(capabilities["protocol_version"], 1);
+        assert!(capabilities["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "tab_switch_by_id_v1"));
+    }
+
     async fn wait_for_server(port: u16, timeout: Duration) -> Result<(), String> {
         let start = Instant::now();
         let url = format!("http://127.0.0.1:{}/info/version", port);
@@ -460,12 +502,14 @@ mod web_client_tests {
 
         let (mut control_sink, mut control_stream) = control_ws.split();
 
-        let unsolicited = timeout(Duration::from_millis(500), control_stream.next()).await;
-        assert!(
-            unsolicited.is_err(),
-            "no control message may be pushed before the first render, got: {:?}",
-            unsolicited
-        );
+        let initial_config = timeout(Duration::from_secs(5), control_stream.next())
+            .await
+            .expect("initial configuration timed out")
+            .expect("control socket closed")
+            .expect("failed to receive initial configuration");
+        let initial_config: serde_json::Value =
+            serde_json::from_str(initial_config.to_text().unwrap()).unwrap();
+        assert_eq!(initial_config["type"], "SetConfig");
 
         let resize_msg = WebClientToWebServerControlMessage {
             web_client_id: web_client_id.clone(),
@@ -838,7 +882,9 @@ mod web_client_tests {
             }),
         };
         control_sink
-            .send(Message::Text(serde_json::to_string(&resize_msg).unwrap()))
+            .send(Message::Text(
+                serde_json::to_string(&resize_msg).unwrap().into(),
+            ))
             .await
             .expect("Failed to send initial resize");
 
@@ -1832,7 +1878,7 @@ mod web_client_tests {
         let (mut regular_control_sink, _regular_control_stream) = regular_control_ws.split();
 
         let regular_terminal_ws_url = format!(
-            "ws://127.0.0.1:{}/ws/terminal?web_client_id={}",
+            "ws://127.0.0.1:{}/ws/terminal/watcher-test?web_client_id={}",
             port, regular_web_client_id
         );
         let (regular_terminal_ws, _) = timeout(
@@ -1888,7 +1934,7 @@ mod web_client_tests {
         let (mut readonly_control_sink, _readonly_control_stream) = readonly_control_ws.split();
 
         let readonly_terminal_ws_url = format!(
-            "ws://127.0.0.1:{}/ws/terminal?web_client_id={}",
+            "ws://127.0.0.1:{}/ws/terminal/watcher-test?web_client_id={}",
             port, readonly_web_client_id
         );
         let (readonly_terminal_ws, _) = timeout(
@@ -3496,7 +3542,7 @@ mod web_client_tests {
             create_client_session_with_query(port, &session_token, query).await;
 
         let terminal_ws_url = format!(
-            "ws://127.0.0.1:{}/ws/terminal/{}?web_client_id={}",
+            "ws://127.0.0.1:{}/ws/terminal/{}?web_client_id={}&create=true",
             port, session_name, web_client_id
         );
         let (terminal_ws, _) = timeout(

@@ -104,7 +104,7 @@ pub enum ServerInstruction {
         bool,                // is_web_client
         ClientId,
     ),
-    AttachWatcherClient(ClientId, Size, bool), // bool -> is_web_client
+    AttachWatcherClient(ClientId, Size, bool, bool), // bools -> is_web_client, inventory_only
     ConnStatus(ClientId),
     Log(Vec<String>, ClientId, Option<NotificationEnd>),
     LogError(Vec<String>, ClientId, Option<NotificationEnd>),
@@ -1371,7 +1371,12 @@ pub fn start_server_impl(
                     ))
                     .unwrap();
             },
-            ServerInstruction::AttachWatcherClient(client_id, terminal_size, is_web_client) => {
+            ServerInstruction::AttachWatcherClient(
+                client_id,
+                terminal_size,
+                is_web_client,
+                inventory_only,
+            ) => {
                 // the client_id was inserted into clients upon ipc tunnel initialization
                 // now that it identified itself as a watcher, we need to convert it
 
@@ -1391,6 +1396,8 @@ pub fn start_server_impl(
                     .send_to_screen(ScreenInstruction::AddWatcherClient(
                         client_id,
                         terminal_size,
+                        is_web_client,
+                        inventory_only,
                     ))
                     .unwrap();
             },

@@ -1,7 +1,8 @@
 use crate::web_client::authentication::SessionTokenHash;
 use crate::web_client::control_message::{
-    SetConfigPayload, TerminalMetricsPayload, WebClientToWebServerControlMessage,
-    WebClientToWebServerControlMessagePayload, WebServerToWebClientControlMessage,
+    InventoryMonitorReadyPayload, SetConfigPayload, TerminalMetricsPayload,
+    WebClientToWebServerControlMessage, WebClientToWebServerControlMessagePayload,
+    WebServerToWebClientControlMessage,
 };
 use crate::web_client::message_handlers::{
     parse_stdin, render_to_client, send_control_messages_to_client, StdinSession,
@@ -20,6 +21,7 @@ use axum::{
 use futures::StreamExt;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 use zellij_utils::{
     data::PaneId,
     input::actions::Action,
@@ -27,6 +29,98 @@ use zellij_utils::{
     ipc::{ClientToServerMsg, PixelDimensions},
     pane_size::{Size, SizeInPixels},
 };
+
+pub async fn ws_handler_inventory(
+    ws: WebSocketUpgrade,
+    AxumPath(session_name): AxumPath<String>,
+    State(state): State<AppState>,
+    axum::Extension(session_token_hash): axum::Extension<SessionTokenHash>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| {
+        handle_ws_inventory(socket, session_name, state, session_token_hash)
+    })
+}
+
+async fn handle_ws_inventory(
+    socket: WebSocket,
+    session_name: String,
+    state: AppState,
+    session_token_hash: SessionTokenHash,
+) {
+    let web_client_id = Uuid::new_v4().to_string();
+    let Ok(os_input) = state.client_os_api_factory.create_client_os_api() else {
+        return;
+    };
+    state.connection_table.lock().unwrap().add_new_client(
+        web_client_id.clone(),
+        os_input.clone(),
+        true,
+        session_token_hash.0,
+    );
+
+    let (socket_tx, mut socket_rx) = socket.split();
+    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+    send_control_messages_to_client(control_rx, socket_tx);
+    state
+        .connection_table
+        .lock()
+        .unwrap()
+        .add_client_control_tx(&web_client_id, control_tx.clone());
+
+    let ready =
+        WebServerToWebClientControlMessage::InventoryMonitorReady(InventoryMonitorReadyPayload {
+            web_client_id: web_client_id.clone(),
+            session_name: session_name.clone(),
+        });
+    let _ = control_tx.send(Message::Text(serde_json::to_string(&ready).unwrap().into()));
+
+    zellij_server_listener(
+        os_input.clone(),
+        state.connection_table.clone(),
+        Some(session_name),
+        state.config.lock().unwrap().clone(),
+        state.config_options.clone(),
+        Some(state.config_file_path.clone()),
+        web_client_id.clone(),
+        state.session_manager.clone(),
+        None,
+        false,
+        None,
+        None,
+        None,
+        state.pending_welcome_sessions.clone(),
+        true,
+    );
+
+    while let Some(Ok(message)) = socket_rx.next().await {
+        match message {
+            Message::Text(text) => {
+                let Ok(message) = serde_json::from_str::<WebClientToWebServerControlMessage>(&text)
+                else {
+                    continue;
+                };
+                if message.web_client_id != web_client_id {
+                    continue;
+                }
+                if let WebClientToWebServerControlMessagePayload::RequestTabSnapshot {
+                    session_id,
+                } = message.payload
+                {
+                    os_input.send_to_server(ClientToServerMsg::RequestTabSnapshot { session_id });
+                }
+            },
+            Message::Close(_) => break,
+            _ => {},
+        }
+    }
+
+    os_input.send_to_server(ClientToServerMsg::ClientExited);
+    state
+        .connection_table
+        .lock()
+        .unwrap()
+        .remove_client(&web_client_id);
+}
 
 pub async fn ws_handler_control(
     ws: WebSocketUpgrade,
@@ -245,6 +339,7 @@ async fn handle_ws_terminal(
         client_size,
         client_pixel_dims,
         state.pending_welcome_sessions.clone(),
+        false,
     );
 
     let terminal_channel_cancellation_token = CancellationToken::new();
@@ -460,6 +555,18 @@ fn control_payload_to_server_msgs(
             single_pane,
             fit,
         } => vec![ClientToServerMsg::SetMobileRenderPreferences { single_pane, fit }],
+        WebClientToWebServerControlMessagePayload::RequestTabSnapshot { session_id } => {
+            vec![ClientToServerMsg::RequestTabSnapshot { session_id }]
+        },
+        WebClientToWebServerControlMessagePayload::HostTerminalFocusChanged { focused } => {
+            vec![ClientToServerMsg::HostTerminalFocusChanged { focused }]
+        },
+        WebClientToWebServerControlMessagePayload::GoToTabById(payload) => {
+            vec![ClientToServerMsg::GoToTabById {
+                session_id: payload.session_id,
+                tab_id: payload.tab_id as u64,
+            }]
+        },
         WebClientToWebServerControlMessagePayload::Unknown => {
             log::warn!("Ignoring unknown control message type from web client");
             vec![]
@@ -644,10 +751,11 @@ mod tests {
 
     #[test]
     fn new_pane_in_tab_is_routed_to_the_requesting_client() {
-        let client_msg = control_payload_to_server_msg(
+        let mut client_messages = control_payload_to_server_msgs(
             WebClientToWebServerControlMessagePayload::NewPaneInTab { tab_id: 2 },
-        )
-        .expect("message dropped");
+        );
+        assert_eq!(client_messages.len(), 1);
+        let client_msg = client_messages.remove(0);
         match client_msg {
             ClientToServerMsg::Action {
                 action:
@@ -668,10 +776,26 @@ mod tests {
     }
 
     #[test]
+    fn native_focus_reports_use_host_focus_ipc() {
+        for focused in [false, true] {
+            let message: WebClientToWebServerControlMessage =
+                serde_json::from_value(serde_json::json!({
+                    "web_client_id": "ios-client",
+                    "payload": { "type": "HostTerminalFocusChanged", "focused": focused }
+                }))
+                .unwrap();
+            assert_eq!(
+                control_payload_to_server_msgs(message.payload),
+                vec![ClientToServerMsg::HostTerminalFocusChanged { focused }]
+            );
+        }
+    }
+
+    #[test]
     fn unknown_control_message_is_dropped() {
         assert!(
-            control_payload_to_server_msg(WebClientToWebServerControlMessagePayload::Unknown)
-                .is_none()
+            control_payload_to_server_msgs(WebClientToWebServerControlMessagePayload::Unknown)
+                .is_empty()
         );
     }
 }

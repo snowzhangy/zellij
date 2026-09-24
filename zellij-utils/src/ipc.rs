@@ -75,6 +75,66 @@ pub struct PaneReference {
     pub is_plugin: bool,
 }
 
+/// A stable inventory of the tabs in a session, as viewed by one client.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabSnapshot {
+    pub session_id: String,
+    pub sequence: u64,
+    pub tabs: Vec<TabSnapshotTab>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabSnapshotTab {
+    pub tab_id: usize,
+    pub index: usize,
+    pub name: String,
+    pub active: bool,
+    /// Whether this tab has a pending bell notification (agent attention signal),
+    /// as seen by this client (excludes the client's own active tab).
+    #[serde(default)]
+    pub has_bell: bool,
+    /// Unix timestamp in milliseconds of the latest PTY output observed in this tab.
+    /// This is a best-effort activity hint, not an authoritative agent lifecycle state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_unix_ms: Option<u64>,
+    #[serde(rename = "panes", alias = "pane_ids")]
+    pub pane_ids: Vec<PaneId>,
+}
+
+/// A delta describing a change to one stable tab identity.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabUpdate {
+    pub session_id: String,
+    pub sequence: u64,
+    pub tab_id: usize,
+    pub index: Option<usize>,
+    pub name: Option<String>,
+    pub active: Option<bool>,
+    #[serde(
+        rename = "panes",
+        alias = "pane_ids",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pane_ids: Option<Vec<PaneId>>,
+    pub closed: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabInventoryBatch {
+    pub session_id: String,
+    pub sequence: u64,
+    pub upserts: Vec<TabSnapshotTab>,
+    pub closed_tab_ids: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SessionCapabilities {
+    pub session_id: String,
+    pub session_name: String,
+    pub protocol_version: u32,
+    pub capabilities: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ColorRegister {
     pub index: usize,
@@ -188,6 +248,7 @@ pub enum ClientToServerMsg {
     AttachWatcherClient {
         terminal_size: Size,
         is_web_client: bool,
+        inventory_only: bool,
     },
     Action {
         action: Action,
@@ -243,6 +304,13 @@ pub enum ClientToServerMsg {
     },
     HostTerminalFocusChanged {
         focused: bool,
+    },
+    RequestTabSnapshot {
+        session_id: String,
+    },
+    GoToTabById {
+        session_id: String,
+        tab_id: u64,
     },
 }
 
@@ -301,6 +369,18 @@ pub enum ServerToClientMsg {
     },
     MobileState {
         payload: MobileStatePayload,
+    },
+    TabSnapshot {
+        snapshot: TabSnapshot,
+    },
+    TabUpdate {
+        update: TabUpdate,
+    },
+    TabInventoryBatch {
+        batch: TabInventoryBatch,
+    },
+    SessionCapabilities {
+        capabilities: SessionCapabilities,
     },
 }
 

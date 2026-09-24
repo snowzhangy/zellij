@@ -32,6 +32,8 @@ message ClientToServerMsg {
     RequestSessionListMsg request_session_list = 25;
     SetMobileRenderPreferencesMsg set_mobile_render_preferences = 26;
     HostTerminalFocusChangedMsg host_terminal_focus_changed = 27;
+    RequestTabSnapshotMsg request_tab_snapshot = 28;
+    GoToTabByIdMsg go_to_tab_by_id = 29;
   }
 }
 
@@ -74,6 +76,7 @@ message AttachClientMsg {
 message AttachWatcherClientMsg {
   Size terminal_size = 1;
   bool is_web_client = 2;
+  bool inventory_only = 3;
 }
 
 message ActionMsg {
@@ -126,6 +129,15 @@ message ForwardedReplyFromHostMsg {
 
 message HostTerminalThemeChangedMsg {
   HostTerminalThemeIndication mode = 1;
+}
+
+message RequestTabSnapshotMsg {
+  string session_id = 1;
+}
+
+message GoToTabByIdMsg {
+  string session_id = 1;
+  uint64 tab_id = 2;
 }
 
 enum HostTerminalThemeIndication {

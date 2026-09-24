@@ -21,6 +21,47 @@ message PaneReference {
   bool is_plugin = 2;
 }
 
+message TabSnapshot {
+  string session_id = 1;
+  uint64 sequence = 2;
+  repeated TabSnapshotTab tabs = 3;
+}
+
+message TabSnapshotTab {
+  uint64 tab_id = 1;
+  uint32 index = 2;
+  string name = 3;
+  bool active = 4;
+  repeated PaneId panes = 5;
+  bool has_bell = 6;
+  optional uint64 last_activity_at_unix_ms = 7;
+}
+
+message TabUpdate {
+  string session_id = 1;
+  uint64 sequence = 2;
+  uint64 tab_id = 3;
+  optional uint32 index = 4;
+  optional string name = 5;
+  optional bool active = 6;
+  repeated PaneId panes = 7;
+  bool closed = 8;
+}
+
+message TabInventoryBatch {
+  string session_id = 1;
+  uint64 sequence = 2;
+  repeated TabSnapshotTab upserts = 3;
+  repeated uint64 closed_tab_ids = 4;
+}
+
+message SessionCapabilities {
+  string session_id = 1;
+  string session_name = 2;
+  uint32 protocol_version = 3;
+  repeated string capabilities = 4;
+}
+
 message ColorRegister {
   uint32 index = 1;
   string color = 2;

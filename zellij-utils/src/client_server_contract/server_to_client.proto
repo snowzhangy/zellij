@@ -24,7 +24,19 @@ message ServerToClientMsg {
     SetSoftKeyboardMsg set_soft_keyboard = 17;
     EmitNestedSessionFrameMsg emit_nested_session_frame = 18;
     MobileStateMsg mobile_state = 19;
+    TabSnapshotMsg tab_snapshot = 20;
+    TabUpdateMsg tab_update = 21;
+    SessionCapabilitiesMsg session_capabilities = 22;
+    TabInventoryBatchMsg tab_inventory_batch = 23;
   }
+}
+
+message SessionCapabilitiesMsg {
+  SessionCapabilities capabilities = 1;
+}
+
+message TabInventoryBatchMsg {
+  TabInventoryBatch batch = 1;
 }
 
 message RenderMsg {
@@ -159,4 +171,12 @@ message MobileStateMsg {
   repeated MobilePaneMsg panes = 8;
   repeated MobileSessionMsg sessions = 9;
   MobileRenderPrefsMsg render_prefs = 10;
+}
+
+message TabSnapshotMsg {
+  TabSnapshot snapshot = 1;
+}
+
+message TabUpdateMsg {
+  TabUpdate update = 1;
 }

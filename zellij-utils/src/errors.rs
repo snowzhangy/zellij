@@ -392,6 +392,7 @@ pub enum ScreenContext {
     GetFocusedPaneInfo,
     GetPaneInfo,
     GetTabInfo,
+    GetTabSnapshot,
     ListClientsMetadata,
     ListPanes,
     ListTabs,

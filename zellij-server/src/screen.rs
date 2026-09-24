@@ -34,7 +34,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::str;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::route::NotificationEnd;
 
@@ -100,10 +100,13 @@ use crate::{
     ClientId, ServerInstruction,
 };
 use zellij_utils::{
-    data::{Event, InputMode, ModeInfo, Palette, PaletteColor, PluginCapabilities, Style},
+    data::{
+        Event, InputMode, ModeInfo, Palette, PaletteColor, PaneId as DataPaneId,
+        PluginCapabilities, Style,
+    },
     errors::{ContextType, ScreenContext},
     input::get_mode_info,
-    ipc::{ClientAttributes, PixelDimensions},
+    ipc::{ClientAttributes, PixelDimensions, TabInventoryBatch, TabSnapshot, TabSnapshotTab},
     nested_session::{self, NestedSessionCapability, NestedSessionMessage},
 };
 
@@ -441,6 +444,10 @@ pub enum ScreenInstruction {
         tab_id: usize,
         response_channel: crossbeam::channel::Sender<Option<TabInfo>>,
     },
+    GetTabSnapshot {
+        client_id: ClientId,
+        requested_session_id: String,
+    },
     EditScrollback(ClientId, bool, Option<NotificationEnd>),
     GetPaneScrollback {
         pane_id: PaneId,
@@ -532,6 +539,11 @@ pub enum ScreenInstruction {
     MoveTabLeft(ClientId, Option<NotificationEnd>),
     MoveTabRight(ClientId, Option<NotificationEnd>),
     GoToTabWithId(usize, Option<ClientId>, Option<NotificationEnd>),
+    GoToTabById {
+        session_id: String,
+        tab_id: usize,
+        client_id: ClientId,
+    },
     CloseTabWithId(usize, Option<NotificationEnd>),
     RenameTabWithId(usize, Vec<u8>, Option<NotificationEnd>),
     BreakPanesToTabWithId {
@@ -903,7 +915,7 @@ pub enum ScreenInstruction {
     InterceptKeyPresses(PluginId, ClientId),
     ClearKeyPressesIntercepts(ClientId),
     ReplacePaneWithExistingPane(PaneId, PaneId, bool, Option<NotificationEnd>), // bool -> suppress_replaced_pane
-    AddWatcherClient(ClientId, Size),
+    AddWatcherClient(ClientId, Size, bool, bool), // is_web_client, inventory_only
     RemoveWatcherClient(ClientId),
     SetFollowedClient(ClientId),
     WatcherTerminalResize(ClientId, Size),
@@ -1041,6 +1053,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::GetFocusedPaneInfo { .. } => ScreenContext::GetFocusedPaneInfo,
             ScreenInstruction::GetPaneInfo { .. } => ScreenContext::GetPaneInfo,
             ScreenInstruction::GetTabInfo { .. } => ScreenContext::GetTabInfo,
+            ScreenInstruction::GetTabSnapshot { .. } => ScreenContext::GetTabSnapshot,
             ScreenInstruction::EditScrollback(..) => ScreenContext::EditScrollback,
             ScreenInstruction::GetPaneScrollback { .. } => ScreenContext::GetPaneScrollback,
             ScreenInstruction::ScrollUp(..) => ScreenContext::ScrollUp,
@@ -1087,7 +1100,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::UndoRenameTab(..) => ScreenContext::UndoRenameTab,
             ScreenInstruction::MoveTabLeft(..) => ScreenContext::MoveTabLeft,
             ScreenInstruction::MoveTabRight(..) => ScreenContext::MoveTabRight,
-            ScreenInstruction::GoToTabWithId(..) => ScreenContext::GoToTabWithId,
+            ScreenInstruction::GoToTabWithId(..) | ScreenInstruction::GoToTabById { .. } => {
+                ScreenContext::GoToTabWithId
+            },
             ScreenInstruction::CloseTabWithId(..) => ScreenContext::CloseTabWithId,
             ScreenInstruction::RenameTabWithId(..) => ScreenContext::RenameTabWithId,
             ScreenInstruction::BreakPanesToTabWithId { .. } => ScreenContext::BreakPanesToTabWithId,
@@ -1456,13 +1471,15 @@ impl RenderBlocker {
 pub(crate) struct WatcherState {
     size: Size,
     should_force_render: bool,
+    render_enabled: bool,
 }
 
 impl WatcherState {
-    pub fn new(size: Size) -> Self {
+    pub fn new(size: Size, render_enabled: bool) -> Self {
         WatcherState {
             size,
             should_force_render: true,
+            render_enabled,
         }
     }
 
@@ -1484,6 +1501,10 @@ impl WatcherState {
 
     pub fn set_force_render(&mut self) {
         self.should_force_render = true;
+    }
+
+    pub fn render_enabled(&self) -> bool {
+        self.render_enabled
     }
 }
 
@@ -1538,7 +1559,13 @@ pub(crate) struct Screen {
     terminal_emulator_colors: Rc<RefCell<Palette>>,
     terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
     connected_clients: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
-    /// The indices of this [`Screen`]'s active [`Tab`]s.
+    web_tab_ids: HashMap<ClientId, HashSet<usize>>,
+    web_inventory_states: HashMap<ClientId, HashMap<usize, TabSnapshotTab>>,
+    web_inventory_sequences: HashMap<ClientId, u64>,
+    web_inventory_watchers: HashSet<ClientId>,
+    web_tab_last_activity_at: HashMap<usize, u64>,
+    web_tab_activity_last_reported_at: HashMap<usize, Instant>,
+    /// The indices of this [`Screen`]'s active [`Tab`].
     active_tab_ids: BTreeMap<ClientId, usize>,
     client_sizes: HashMap<ClientId, Size>,
     global_last_active_tab_id: usize,
@@ -1557,6 +1584,7 @@ pub(crate) struct Screen {
     copy_options: CopyOptions,
     debug: bool,
     session_name: String,
+    session_id: String,
     peer_sessions_cache: BTreeMap<String, SessionInfo>, // String is the session name, can
     // also be this session
     resurrectable_sessions_cache: BTreeMap<String, Duration>, // String is the session name,
@@ -1751,6 +1779,13 @@ impl Screen {
             client_kitty_host_state: Rc::new(RefCell::new(HashMap::new())),
             style: client_attributes.style,
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
+            web_tab_ids: HashMap::new(),
+            web_inventory_states: HashMap::new(),
+            web_inventory_sequences: HashMap::new(),
+            web_inventory_watchers: HashSet::new(),
+            web_tab_last_activity_at: HashMap::new(),
+            web_tab_activity_last_reported_at: HashMap::new(),
+            session_id: uuid::Uuid::new_v4().to_string(),
             active_tab_ids: BTreeMap::new(),
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
@@ -4179,7 +4214,10 @@ impl Screen {
             .borrow()
             .keys()
             .any(|id| !self.watcher_clients.contains_key(id));
-        let has_watchers = !self.watcher_clients.is_empty(); // No change needed
+        let has_watchers = self
+            .watcher_clients
+            .values()
+            .any(WatcherState::render_enabled);
 
         // Track whether non-watcher output was dirty for conditional watcher rendering
         let non_watcher_output_was_dirty;
@@ -4375,7 +4413,7 @@ impl Screen {
                     let any_watcher_needs_force_render = self
                         .watcher_clients
                         .values()
-                        .any(|state| state.should_force_render());
+                        .any(|state| state.render_enabled() && state.should_force_render());
                     let should_force_render = non_watcher_output_was_dirty
                         || any_watcher_needs_force_render
                         || !has_regular_clients;
@@ -4393,6 +4431,9 @@ impl Screen {
 
                     // For each watcher, clone the output and serialize with size constraints
                     for (watcher_id, watcher_state) in &self.watcher_clients {
+                        if !watcher_state.render_enabled() {
+                            continue;
+                        }
                         let mut watcher_specific_output = watcher_output.clone();
 
                         // Serialize this watcher's output with size constraints (cropping and padding handled inside)
@@ -5139,6 +5180,26 @@ impl Screen {
         if !self.nested_ancestry.is_empty() || !self.host_descend_keys.is_empty() {
             self.update_all_clients_nesting_mode_info();
         }
+        if is_web_client {
+            if let Some(os_input) = self.bus.os_input.as_ref() {
+                let _ = os_input.send_to_client(
+                    client_id,
+                    ServerToClientMsg::SessionCapabilities {
+                        capabilities: zellij_utils::ipc::SessionCapabilities {
+                            session_id: self.session_id.clone(),
+                            session_name: self.session_name.clone(),
+                            protocol_version: 1,
+                            capabilities: vec![
+                                "tab_inventory_v1".to_owned(),
+                                "tab_switch_by_id_v1".to_owned(),
+                                "tab_activity_v1".to_owned(),
+                                "viewport_scroll_v1".to_owned(),
+                            ],
+                        },
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
@@ -5234,6 +5295,9 @@ impl Screen {
         if removed_sixel_capability {
             self.push_sixel_host_support_to_tabs();
         }
+        self.web_tab_ids.remove(&client_id);
+        self.web_inventory_states.remove(&client_id);
+        self.web_inventory_sequences.remove(&client_id);
         self.client_sizes.remove(&client_id);
         self.pane_render_subscribers.remove(&client_id);
         self.currently_marking_pane_group
@@ -5263,21 +5327,54 @@ impl Screen {
         Ok(())
     }
 
-    pub fn add_watcher_client(&mut self, client_id: ClientId) -> Result<()> {
+    pub fn add_watcher_client(
+        &mut self,
+        client_id: ClientId,
+        is_web_client: bool,
+        inventory_only: bool,
+    ) -> Result<()> {
         // Initialize with a default size - will be updated when we receive the actual size
         let default_size = Size { rows: 24, cols: 80 }; // Reasonable default
         self.watcher_clients
-            .insert(client_id, WatcherState::new(default_size));
+            .insert(client_id, WatcherState::new(default_size, !inventory_only));
+
+        if is_web_client {
+            self.web_inventory_watchers.insert(client_id);
+            if let Some(os_input) = self.bus.os_input.as_ref() {
+                let _ = os_input.send_to_client(
+                    client_id,
+                    ServerToClientMsg::SessionCapabilities {
+                        capabilities: zellij_utils::ipc::SessionCapabilities {
+                            session_id: self.session_id.clone(),
+                            session_name: self.session_name.clone(),
+                            protocol_version: 1,
+                            capabilities: vec![
+                                "tab_inventory_v1".to_owned(),
+                                "tab_switch_by_id_v1".to_owned(),
+                                "tab_activity_v1".to_owned(),
+                                "viewport_scroll_v1".to_owned(),
+                            ],
+                        },
+                    },
+                );
+            }
+        }
 
         // Force a full render for the new watcher
         // This ensures they get complete state, not just delta
-        self.render(None)?;
+        if !inventory_only {
+            self.render(None)?;
+        }
 
         Ok(())
     }
 
     pub fn remove_watcher_client(&mut self, client_id: ClientId) {
         self.watcher_clients.remove(&client_id);
+        self.web_inventory_watchers.remove(&client_id);
+        self.web_tab_ids.remove(&client_id);
+        self.web_inventory_states.remove(&client_id);
+        self.web_inventory_sequences.remove(&client_id);
     }
 
     pub fn set_followed_client(&mut self, client_id: ClientId) -> Result<()> {
@@ -5292,6 +5389,124 @@ impl Screen {
         if let Some(watcher_state) = self.watcher_clients.get_mut(&client_id) {
             watcher_state.set_size(size);
             watcher_state.set_force_render();
+        }
+    }
+
+    fn web_inventory_client_ids(&self) -> HashSet<ClientId> {
+        let mut client_ids: HashSet<ClientId> = self
+            .connected_clients
+            .borrow()
+            .iter()
+            .filter_map(|(client_id, is_web_client)| is_web_client.then_some(*client_id))
+            .collect();
+        client_ids.extend(self.web_inventory_watchers.iter().copied());
+        client_ids
+    }
+
+    fn tab_snapshot_state(&self, tab_id: usize, client_id: ClientId) -> Option<TabSnapshotTab> {
+        let tab = self.tabs.get(&tab_id)?;
+        Some(TabSnapshotTab {
+            tab_id: tab.id,
+            index: tab.position,
+            name: tab.name.clone(),
+            active: self.active_tab_ids.get(&client_id) == Some(&tab.id),
+            has_bell: tab.tab_has_pending_bell
+                && self.active_tab_ids.get(&client_id) != Some(&tab.id),
+            last_activity_at_unix_ms: self.web_tab_last_activity_at.get(&tab.id).copied(),
+            pane_ids: tab
+                .pane_infos()
+                .into_iter()
+                .map(|pane| {
+                    if pane.is_plugin {
+                        DataPaneId::Plugin(pane.id)
+                    } else {
+                        DataPaneId::Terminal(pane.id)
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    fn report_tab_activity(&mut self, tab_id: usize) -> Result<()> {
+        const REPORT_INTERVAL: Duration = Duration::from_millis(1_500);
+
+        let client_ids = self.web_inventory_client_ids();
+        if client_ids.is_empty() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if self
+            .web_tab_activity_last_reported_at
+            .get(&tab_id)
+            .is_some_and(|last_report| now.duration_since(*last_report) < REPORT_INTERVAL)
+        {
+            return Ok(());
+        }
+        self.web_tab_activity_last_reported_at.insert(tab_id, now);
+        let unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
+        self.web_tab_last_activity_at.insert(tab_id, unix_ms);
+
+        let client_states = client_ids
+            .into_iter()
+            .filter_map(|client_id| {
+                self.tab_snapshot_state(tab_id, client_id)
+                    .map(|state| (client_id, state))
+            })
+            .collect::<Vec<_>>();
+        let mut batches = Vec::new();
+        for (client_id, state) in client_states {
+            self.web_tab_ids
+                .entry(client_id)
+                .or_default()
+                .insert(tab_id);
+            let previous = self
+                .web_inventory_states
+                .entry(client_id)
+                .or_default()
+                .insert(tab_id, state.clone());
+            if previous.as_ref() == Some(&state) {
+                continue;
+            }
+            let sequence = self.web_inventory_sequences.entry(client_id).or_insert(0);
+            *sequence = sequence.wrapping_add(1);
+            batches.push((
+                client_id,
+                TabInventoryBatch {
+                    session_id: self.session_id.clone(),
+                    sequence: *sequence,
+                    upserts: vec![state],
+                    closed_tab_ids: vec![],
+                },
+            ));
+        }
+        if let Some(os_input) = self.bus.os_input.as_ref() {
+            for (client_id, batch) in batches {
+                let _ = os_input
+                    .send_to_client(client_id, ServerToClientMsg::TabInventoryBatch { batch });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_tab_snapshot(&self, client_id: ClientId) -> TabSnapshot {
+        let mut tabs: Vec<TabSnapshotTab> = self
+            .tabs
+            .keys()
+            .filter_map(|tab_id| self.tab_snapshot_state(*tab_id, client_id))
+            .collect();
+        tabs.sort_by_key(|tab| tab.index);
+        TabSnapshot {
+            session_id: self.session_id.clone(),
+            sequence: self
+                .web_inventory_sequences
+                .get(&client_id)
+                .copied()
+                .unwrap_or(0),
+            tabs,
         }
     }
 
@@ -5391,11 +5606,70 @@ impl Screen {
                 ));
             }
         }
+        let tab_infos = tab_infos_for_screen_state
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let web_client_ids = self.web_inventory_client_ids();
+        let mut web_tab_batches = Vec::new();
+        for client_id in web_client_ids {
+            let current_tab_ids: HashSet<usize> = tab_infos.iter().map(|tab| tab.tab_id).collect();
+            let previous_tab_ids = self
+                .web_tab_ids
+                .insert(client_id, current_tab_ids.clone())
+                .unwrap_or_default();
+            let closed_tab_ids = previous_tab_ids
+                .difference(&current_tab_ids)
+                .copied()
+                .collect::<Vec<_>>();
+            let current_states: HashMap<usize, TabSnapshotTab> = tab_infos
+                .iter()
+                .filter_map(|tab| {
+                    self.tab_snapshot_state(tab.tab_id, client_id)
+                        .map(|state| (state.tab_id, state))
+                })
+                .collect();
+            let previous_states = self
+                .web_inventory_states
+                .insert(client_id, current_states.clone())
+                .unwrap_or_default();
+            let upserts = current_states
+                .into_iter()
+                .filter_map(|(id, state)| {
+                    (previous_states.get(&id) != Some(&state)).then_some(state)
+                })
+                .collect::<Vec<_>>();
+            if upserts.is_empty() && closed_tab_ids.is_empty() {
+                continue;
+            }
+            let sequence = self.web_inventory_sequences.entry(client_id).or_insert(0);
+            *sequence = sequence.wrapping_add(1);
+            web_tab_batches.push((
+                client_id,
+                TabInventoryBatch {
+                    session_id: self.session_id.clone(),
+                    sequence: *sequence,
+                    upserts,
+                    closed_tab_ids,
+                },
+            ));
+        }
+        if let Some(os_input) = self.bus.os_input.as_ref() {
+            for (client_id, batch) in web_tab_batches {
+                let _ = os_input
+                    .send_to_client(client_id, ServerToClientMsg::TabInventoryBatch { batch });
+            }
+        }
+        let current_tab_ids = self.tabs.keys().copied().collect::<HashSet<_>>();
+        self.web_tab_last_activity_at
+            .retain(|tab_id, _| current_tab_ids.contains(tab_id));
+        self.web_tab_activity_last_reported_at
+            .retain(|tab_id, _| current_tab_ids.contains(tab_id));
         self.bus
             .senders
             .send_to_plugin(PluginInstruction::Update(plugin_updates))
             .context("failed to update tabs")?;
-        Ok(tab_infos_for_screen_state.values().cloned().collect())
+        Ok(tab_infos)
     }
     fn generate_and_report_pane_state(&mut self) -> Result<PaneManifest> {
         let mut pane_manifest = PaneManifest::default();
@@ -8280,16 +8554,23 @@ pub(crate) fn screen_thread_main(
                 screen
                     .pane_output_activity
                     .insert(PaneId::Terminal(pid), Instant::now());
-                let all_tabs = screen.get_tabs_mut();
                 let mut vte_bytes = Some(vte_bytes);
-                for tab in all_tabs.values_mut() {
-                    if tab.has_terminal_pid(pid) {
-                        if let Some(bytes) = vte_bytes.take() {
-                            tab.handle_pty_bytes(pid, bytes)
-                                .context("failed to process pty bytes")?;
+                let mut activity_tab_id = None;
+                {
+                    let all_tabs = screen.get_tabs_mut();
+                    for tab in all_tabs.values_mut() {
+                        if tab.has_terminal_pid(pid) {
+                            if let Some(bytes) = vte_bytes.take() {
+                                tab.handle_pty_bytes(pid, bytes)
+                                    .context("failed to process pty bytes")?;
+                                activity_tab_id = Some(tab.id);
+                            }
+                            break;
                         }
-                        break;
                     }
+                }
+                if let Some(tab_id) = activity_tab_id {
+                    screen.report_tab_activity(tab_id)?;
                 }
                 if let Some(vte_bytes) = vte_bytes {
                     pending_events_waiting_for_pane
@@ -9206,6 +9487,21 @@ pub(crate) fn screen_thread_main(
             } => {
                 let tab_info = screen.get_tab_info(tab_id);
                 let _ = response_channel.send(tab_info);
+            },
+            ScreenInstruction::GetTabSnapshot {
+                client_id,
+                requested_session_id,
+            } => {
+                if requested_session_id == screen.session_id {
+                    if let Some(os_input) = screen.bus.os_input.as_ref() {
+                        let _ = os_input.send_to_client(
+                            client_id,
+                            ServerToClientMsg::TabSnapshot {
+                                snapshot: screen.get_tab_snapshot(client_id),
+                            },
+                        );
+                    }
+                }
             },
             ScreenInstruction::ListClientsToPlugin(plugin_id, client_id) => {
                 let err_context = || format!("Failed to dump layout");
@@ -11335,6 +11631,18 @@ pub(crate) fn screen_thread_main(
                     }
                 }
             },
+            ScreenInstruction::GoToTabById {
+                session_id,
+                tab_id,
+                client_id,
+            } => {
+                if session_id == screen.session_id {
+                    if let Some(tab_position) = screen.get_tab_position_by_id(tab_id) {
+                        screen.switch_active_tab(tab_position, None, true, client_id)?;
+                        screen.render(None)?;
+                    }
+                }
+            },
             ScreenInstruction::RenameTabWithId(tab_id, new_name, _completion_tx) => {
                 // Use get_tab_by_id_mut() helper method
                 if let Some(tab) = screen.get_tab_by_id_mut(tab_id) {
@@ -12233,9 +12541,9 @@ pub(crate) fn screen_thread_main(
                 suppress_replaced_pane,
                 completion_tx,
             ),
-            ScreenInstruction::AddWatcherClient(client_id, size) => {
+            ScreenInstruction::AddWatcherClient(client_id, size, is_web_client, inventory_only) => {
                 screen
-                    .add_watcher_client(client_id)
+                    .add_watcher_client(client_id, is_web_client, inventory_only)
                     .context("failed to add watcher client")?;
                 screen.set_watcher_size(client_id, size);
                 screen.render(None)?;

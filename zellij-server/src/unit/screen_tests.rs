@@ -935,6 +935,80 @@ fn open_new_tab() {
 }
 
 #[test]
+fn tab_snapshot_uses_the_clients_last_inventory_batch_sequence() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    let web_client_id = 2;
+
+    new_tab(&mut screen, 1, 0);
+    screen.add_client(web_client_id, true).expect("TEST");
+
+    // Only the first report changes this client's inventory. Later reports
+    // must not advance the snapshot beyond its last emitted batch.
+    for _ in 0..3 {
+        screen.generate_and_report_tab_state().expect("TEST");
+    }
+
+    let last_batch_sequence = screen
+        .web_inventory_sequences
+        .get(&web_client_id)
+        .copied()
+        .expect("web client should have an inventory sequence");
+    assert_eq!(last_batch_sequence, 1);
+    assert_eq!(
+        screen.get_tab_snapshot(web_client_id).sequence,
+        last_batch_sequence,
+        "snapshot and incremental batches must share one per-client sequence space"
+    );
+}
+
+#[test]
+fn recent_tab_activity_updates_inventory_once_per_throttle_window() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut screen = create_new_screen(size, true, true);
+    let web_client_id = 2;
+
+    new_tab(&mut screen, 1, 0);
+    screen.add_client(web_client_id, true).expect("TEST");
+    screen.generate_and_report_tab_state().expect("TEST");
+
+    let tab_id = screen.get_active_tab(web_client_id).expect("active tab").id;
+    let initial_sequence = screen
+        .web_inventory_sequences
+        .get(&web_client_id)
+        .copied()
+        .expect("initial inventory sequence");
+
+    screen.report_tab_activity(tab_id).expect("TEST");
+    let activity_sequence = screen
+        .web_inventory_sequences
+        .get(&web_client_id)
+        .copied()
+        .expect("activity inventory sequence");
+    assert_eq!(activity_sequence, initial_sequence + 1);
+    assert!(screen
+        .get_tab_snapshot(web_client_id)
+        .tabs
+        .iter()
+        .find(|tab| tab.tab_id == tab_id)
+        .and_then(|tab| tab.last_activity_at_unix_ms)
+        .is_some());
+
+    screen.report_tab_activity(tab_id).expect("TEST");
+    assert_eq!(
+        screen.web_inventory_sequences.get(&web_client_id).copied(),
+        Some(activity_sequence),
+        "immediate activity must not emit another inventory batch"
+    );
+}
+
+#[test]
 pub fn switch_to_prev_tab() {
     let size = Size {
         cols: 121,
@@ -12310,7 +12384,7 @@ fn attaching_web_watcher_follows_the_host_tab() {
     new_tab(&mut screen, 1, 0);
     new_tab(&mut screen, 2, 1);
 
-    screen.add_watcher_client(2).expect("TEST");
+    screen.add_watcher_client(2, true, false).expect("TEST");
     screen.add_client(2, true).expect("TEST");
 
     assert_eq!(

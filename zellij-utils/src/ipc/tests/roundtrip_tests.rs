@@ -20,7 +20,8 @@ use crate::input::options::{
 use crate::ipc::{
     ClientToServerMsg, ColorRegister, ExitReason, MobileActivePanePayload, MobilePanePayload,
     MobileRenderPrefsPayload, MobileSessionPayload, MobileSizePayload, MobileStatePayload,
-    MobileTabPayload, PaneReference, PixelDimensions, ServerToClientMsg,
+    MobileTabPayload, PaneReference, PixelDimensions, ServerToClientMsg, SessionCapabilities,
+    TabInventoryBatch, TabSnapshot, TabSnapshotTab, TabUpdate,
 };
 use crate::pane_size::{Size, SizeInPixels};
 use crate::position::Position;
@@ -3447,6 +3448,13 @@ fn test_client_messages() {
     });
     test_client_roundtrip!(ClientToServerMsg::HostTerminalFocusChanged { focused: true });
     test_client_roundtrip!(ClientToServerMsg::HostTerminalFocusChanged { focused: false });
+    test_client_roundtrip!(ClientToServerMsg::RequestTabSnapshot {
+        session_id: "session-id".to_owned(),
+    });
+    test_client_roundtrip!(ClientToServerMsg::GoToTabById {
+        session_id: "session-id".to_owned(),
+        tab_id: 42,
+    });
     test_client_roundtrip!(ClientToServerMsg::WebServerStarted {
         base_url: "http://localhost:8080".to_string(),
     });
@@ -4027,6 +4035,89 @@ fn test_server_messages() {
             },
         },
     });
+    let inventory_tab = TabSnapshotTab {
+        tab_id: 42,
+        index: 2,
+        name: "Agent".to_owned(),
+        active: true,
+        has_bell: false,
+        last_activity_at_unix_ms: Some(1_700_000_000_000),
+        pane_ids: vec![PaneId::Terminal(7)],
+    };
+    test_server_roundtrip!(ServerToClientMsg::TabSnapshot {
+        snapshot: TabSnapshot {
+            session_id: "session-id".to_owned(),
+            sequence: 8,
+            tabs: vec![inventory_tab.clone()],
+        },
+    });
+    test_server_roundtrip!(ServerToClientMsg::TabUpdate {
+        update: TabUpdate {
+            session_id: "session-id".to_owned(),
+            sequence: 9,
+            tab_id: 42,
+            index: Some(2),
+            name: Some("Agent".to_owned()),
+            active: Some(true),
+            pane_ids: Some(vec![PaneId::Terminal(7)]),
+            closed: false,
+        },
+    });
+    test_server_roundtrip!(ServerToClientMsg::TabInventoryBatch {
+        batch: TabInventoryBatch {
+            session_id: "session-id".to_owned(),
+            sequence: 9,
+            upserts: vec![inventory_tab],
+            closed_tab_ids: vec![4],
+        },
+    });
+    test_server_roundtrip!(ServerToClientMsg::SessionCapabilities {
+        capabilities: SessionCapabilities {
+            session_id: "session-id".to_owned(),
+            session_name: "work".to_owned(),
+            protocol_version: 1,
+            capabilities: vec!["tab_inventory_v1".to_owned()],
+        },
+    });
+}
+
+#[test]
+fn hub_inventory_messages_survive_wire_encoding() {
+    use prost::Message;
+
+    let client_message = ClientToServerMsg::GoToTabById {
+        session_id: "session-id".to_owned(),
+        tab_id: 42,
+    };
+    let proto: crate::client_server_contract::client_server_contract::ClientToServerMsg =
+        client_message.clone().into();
+    let decoded = crate::client_server_contract::client_server_contract::ClientToServerMsg::decode(
+        proto.encode_to_vec().as_slice(),
+    )
+    .expect("decode client inventory message");
+    let roundtrip: ClientToServerMsg = decoded
+        .try_into()
+        .expect("convert client inventory message");
+    assert_eq!(client_message, roundtrip);
+
+    let server_message = ServerToClientMsg::SessionCapabilities {
+        capabilities: SessionCapabilities {
+            session_id: "session-id".to_owned(),
+            session_name: "work".to_owned(),
+            protocol_version: 1,
+            capabilities: vec!["tab_inventory_v1".to_owned()],
+        },
+    };
+    let proto: crate::client_server_contract::client_server_contract::ServerToClientMsg =
+        server_message.clone().into();
+    let decoded = crate::client_server_contract::client_server_contract::ServerToClientMsg::decode(
+        proto.encode_to_vec().as_slice(),
+    )
+    .expect("decode server inventory message");
+    let roundtrip: ServerToClientMsg = decoded
+        .try_into()
+        .expect("convert server inventory message");
+    assert_eq!(server_message, roundtrip);
 }
 
 #[test]

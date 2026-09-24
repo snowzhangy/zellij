@@ -1,5 +1,8 @@
 use crate::os_input_output::ClientOsApi;
-use crate::web_client::control_message::{SetConfigPayload, WebServerToWebClientControlMessage};
+use crate::web_client::control_message::{
+    CapabilitiesPayload, SetConfigPayload, TabInventoryBatchPayload, TabSnapshotPayload,
+    TabUpdatePayload, WebServerToWebClientControlMessage,
+};
 use crate::web_client::host_query_seed::build_host_query_seed_msgs;
 use crate::web_client::session_management::{
     build_initial_connection, create_first_message, create_ipc_pipe,
@@ -39,6 +42,7 @@ pub fn zellij_server_listener(
     client_size: Option<Size>,
     client_pixel_dims: Option<SizeInPixels>,
     pending_welcome_sessions: PendingWelcomeSessions,
+    inventory_only: bool,
 ) {
     let _server_listener_thread = std::thread::Builder::new()
         .name("server_listener".to_string())
@@ -159,6 +163,7 @@ pub fn zellij_server_listener(
                     let should_create_new_session = !session_is_attachable;
                     let first_message = create_first_message(
                         is_read_only,
+                        inventory_only,
                         config_file_path.clone(),
                         client_attributes.clone(),
                         config_options.clone(),
@@ -297,6 +302,38 @@ pub fn zellij_server_listener(
                             Some(ServerToClientMsg::PaneRenderUpdate { .. }) => {},
                             Some(ServerToClientMsg::SubscribedPaneClosed { .. }) => {},
                             Some(ServerToClientMsg::EmitNestedSessionFrame { .. }) => {},
+                            Some(ServerToClientMsg::SessionCapabilities { capabilities }) => {
+                                client_connection_bus.send_control(
+                                    WebServerToWebClientControlMessage::Capabilities(CapabilitiesPayload {
+                                        protocol_version: capabilities.protocol_version,
+                                        server_version: zellij_utils::consts::VERSION.to_owned(),
+                                        capabilities: capabilities.capabilities,
+                                        session_id: Some(capabilities.session_id),
+                                        session_name: Some(capabilities.session_name),
+                                    }),
+                                );
+                            },
+                            Some(ServerToClientMsg::TabInventoryBatch { batch }) => {
+                                client_connection_bus.send_control(
+                                    WebServerToWebClientControlMessage::TabInventoryBatch(
+                                        TabInventoryBatchPayload::from(&batch),
+                                    ),
+                                );
+                            },
+                            Some(ServerToClientMsg::TabSnapshot { snapshot }) => {
+                                client_connection_bus.send_control(
+                                    WebServerToWebClientControlMessage::TabSnapshot(
+                                        TabSnapshotPayload::from(&snapshot),
+                                    ),
+                                );
+                            },
+                            Some(ServerToClientMsg::TabUpdate { update }) => {
+                                client_connection_bus.send_control(
+                                    WebServerToWebClientControlMessage::TabUpdate(
+                                        TabUpdatePayload::from(&update),
+                                    ),
+                                );
+                            },
                             Some(ServerToClientMsg::ForwardQueryToHost { token, .. }) => {
                                 // Reply immediately with empty reply_bytes.
                                 // This is the existing convention that signals

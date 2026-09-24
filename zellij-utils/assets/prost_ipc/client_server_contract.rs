@@ -33,6 +33,78 @@ pub struct PaneReference {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabSnapshot {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub sequence: u64,
+    #[prost(message, repeated, tag="3")]
+    pub tabs: ::prost::alloc::vec::Vec<TabSnapshotTab>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabSnapshotTab {
+    #[prost(uint64, tag="1")]
+    pub tab_id: u64,
+    #[prost(uint32, tag="2")]
+    pub index: u32,
+    #[prost(string, tag="3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub active: bool,
+    #[prost(message, repeated, tag="5")]
+    pub panes: ::prost::alloc::vec::Vec<PaneId>,
+    #[prost(bool, tag="6")]
+    pub has_bell: bool,
+    #[prost(uint64, optional, tag="7")]
+    pub last_activity_at_unix_ms: ::core::option::Option<u64>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabUpdate {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub sequence: u64,
+    #[prost(uint64, tag="3")]
+    pub tab_id: u64,
+    #[prost(uint32, optional, tag="4")]
+    pub index: ::core::option::Option<u32>,
+    #[prost(string, optional, tag="5")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag="6")]
+    pub active: ::core::option::Option<bool>,
+    #[prost(message, repeated, tag="7")]
+    pub panes: ::prost::alloc::vec::Vec<PaneId>,
+    #[prost(bool, tag="8")]
+    pub closed: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabInventoryBatch {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub sequence: u64,
+    #[prost(message, repeated, tag="3")]
+    pub upserts: ::prost::alloc::vec::Vec<TabSnapshotTab>,
+    #[prost(uint64, repeated, tag="4")]
+    pub closed_tab_ids: ::prost::alloc::vec::Vec<u64>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionCapabilities {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub session_name: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub protocol_version: u32,
+    #[prost(string, repeated, tag="4")]
+    pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ColorRegister {
     #[prost(uint32, tag="1")]
     pub index: u32,
@@ -3068,7 +3140,7 @@ impl ThemeHue {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -3130,6 +3202,10 @@ pub mod client_to_server_msg {
         SetMobileRenderPreferences(super::SetMobileRenderPreferencesMsg),
         #[prost(message, tag="27")]
         HostTerminalFocusChanged(super::HostTerminalFocusChangedMsg),
+        #[prost(message, tag="28")]
+        RequestTabSnapshot(super::RequestTabSnapshotMsg),
+        #[prost(message, tag="29")]
+        GoToTabById(super::GoToTabByIdMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3195,6 +3271,8 @@ pub struct AttachWatcherClientMsg {
     pub terminal_size: ::core::option::Option<Size>,
     #[prost(bool, tag="2")]
     pub is_web_client: bool,
+    #[prost(bool, tag="3")]
+    pub inventory_only: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3277,6 +3355,20 @@ pub struct HostTerminalThemeChangedMsg {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestTabSnapshotMsg {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GoToTabByIdMsg {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub tab_id: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SoftKeyboardVisibilityChangedMsg {
     #[prost(bool, tag="1")]
     pub visible: bool,
@@ -3347,7 +3439,7 @@ impl HostTerminalThemeIndication {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClientMsg {
-    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19")]
+    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23")]
     pub message: ::core::option::Option<server_to_client_msg::Message>,
 }
 /// Nested message and enum types in `ServerToClientMsg`.
@@ -3393,7 +3485,27 @@ pub mod server_to_client_msg {
         EmitNestedSessionFrame(super::EmitNestedSessionFrameMsg),
         #[prost(message, tag="19")]
         MobileState(super::MobileStateMsg),
+        #[prost(message, tag="20")]
+        TabSnapshot(super::TabSnapshotMsg),
+        #[prost(message, tag="21")]
+        TabUpdate(super::TabUpdateMsg),
+        #[prost(message, tag="22")]
+        SessionCapabilities(super::SessionCapabilitiesMsg),
+        #[prost(message, tag="23")]
+        TabInventoryBatch(super::TabInventoryBatchMsg),
     }
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionCapabilitiesMsg {
+    #[prost(message, optional, tag="1")]
+    pub capabilities: ::core::option::Option<SessionCapabilities>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabInventoryBatchMsg {
+    #[prost(message, optional, tag="1")]
+    pub batch: ::core::option::Option<TabInventoryBatch>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3607,4 +3719,16 @@ pub struct MobileStateMsg {
     pub sessions: ::prost::alloc::vec::Vec<MobileSessionMsg>,
     #[prost(message, optional, tag="10")]
     pub render_prefs: ::core::option::Option<MobileRenderPrefsMsg>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabSnapshotMsg {
+    #[prost(message, optional, tag="1")]
+    pub snapshot: ::core::option::Option<TabSnapshot>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TabUpdateMsg {
+    #[prost(message, optional, tag="1")]
+    pub update: ::core::option::Option<TabUpdate>,
 }

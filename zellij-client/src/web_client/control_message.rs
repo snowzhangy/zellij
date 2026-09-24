@@ -1,8 +1,138 @@
 use serde::{Deserialize, Serialize};
-use zellij_utils::{input::config::Config, ipc::MobileStatePayload, pane_size::Size};
+use zellij_utils::{
+    data::PaneId,
+    input::config::Config,
+    ipc::{MobileStatePayload, TabInventoryBatch, TabSnapshot, TabSnapshotTab, TabUpdate},
+    pane_size::Size,
+};
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WebPaneId {
+    pub kind: String,
+    pub id: u32,
+}
+
+impl From<PaneId> for WebPaneId {
+    fn from(pane_id: PaneId) -> Self {
+        match pane_id {
+            PaneId::Terminal(id) => Self {
+                kind: "terminal".into(),
+                id,
+            },
+            PaneId::Plugin(id) => Self {
+                kind: "plugin".into(),
+                id,
+            },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TabSnapshotTabPayload {
+    pub tab_id: usize,
+    pub index: usize,
+    pub name: String,
+    pub active: bool,
+    #[serde(default)]
+    pub has_bell: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_unix_ms: Option<u64>,
+    pub panes: Vec<WebPaneId>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TabSnapshotPayload {
+    pub session_id: String,
+    pub sequence: u64,
+    pub tabs: Vec<TabSnapshotTabPayload>,
+}
+
+impl From<&TabSnapshot> for TabSnapshotPayload {
+    fn from(snapshot: &TabSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id.clone(),
+            sequence: snapshot.sequence,
+            tabs: snapshot
+                .tabs
+                .iter()
+                .map(|tab| TabSnapshotTabPayload {
+                    tab_id: tab.tab_id,
+                    index: tab.index,
+                    name: tab.name.clone(),
+                    active: tab.active,
+                    has_bell: tab.has_bell,
+                    last_activity_at_unix_ms: tab.last_activity_at_unix_ms,
+                    panes: tab.pane_ids.iter().copied().map(Into::into).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TabUpdatePayload {
+    pub session_id: String,
+    pub sequence: u64,
+    pub tab_id: usize,
+    pub index: Option<usize>,
+    pub name: Option<String>,
+    pub active: Option<bool>,
+    pub panes: Option<Vec<WebPaneId>>,
+    pub closed: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TabInventoryBatchPayload {
+    pub session_id: String,
+    pub sequence: u64,
+    pub upserts: Vec<TabSnapshotTabPayload>,
+    pub closed_tab_ids: Vec<usize>,
+}
+
+impl From<TabSnapshotTab> for TabSnapshotTabPayload {
+    fn from(tab: TabSnapshotTab) -> Self {
+        Self {
+            tab_id: tab.tab_id,
+            index: tab.index,
+            name: tab.name,
+            active: tab.active,
+            has_bell: tab.has_bell,
+            last_activity_at_unix_ms: tab.last_activity_at_unix_ms,
+            panes: tab.pane_ids.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&TabInventoryBatch> for TabInventoryBatchPayload {
+    fn from(batch: &TabInventoryBatch) -> Self {
+        Self {
+            session_id: batch.session_id.clone(),
+            sequence: batch.sequence,
+            upserts: batch.upserts.iter().map(|tab| tab.clone().into()).collect(),
+            closed_tab_ids: batch.closed_tab_ids.clone(),
+        }
+    }
+}
+
+impl From<&TabUpdate> for TabUpdatePayload {
+    fn from(update: &TabUpdate) -> Self {
+        Self {
+            session_id: update.session_id.clone(),
+            sequence: update.sequence,
+            tab_id: update.tab_id,
+            index: update.index,
+            name: update.name.clone(),
+            active: update.active,
+            panes: update
+                .pane_ids
+                .as_ref()
+                .map(|panes| panes.iter().copied().map(Into::into).collect()),
+            closed: update.closed,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-
 pub struct WebClientToWebServerControlMessage {
     pub web_client_id: String,
     pub payload: WebClientToWebServerControlMessagePayload,
@@ -33,6 +163,13 @@ pub enum WebClientToWebServerControlMessagePayload {
         single_pane: bool,
         fit: bool,
     },
+    RequestTabSnapshot {
+        session_id: String,
+    },
+    GoToTabById(GoToTabByIdPayload),
+    HostTerminalFocusChanged {
+        focused: bool,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -51,6 +188,13 @@ pub struct ViewportScrollPayload {
     pub lines: usize,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct GoToTabByIdPayload {
+    #[serde(default)]
+    pub session_id: String,
+    pub tab_id: usize,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewportScrollDirection {
@@ -62,12 +206,44 @@ pub enum ViewportScrollDirection {
 #[serde(tag = "type")]
 pub enum WebServerToWebClientControlMessage {
     SetConfig(SetConfigPayload),
+    InventoryMonitorReady(InventoryMonitorReadyPayload),
+    Capabilities(CapabilitiesPayload),
     QueryTerminalSize,
     Log { lines: Vec<String> },
     LogError { lines: Vec<String> },
     SwitchedSession { new_session_name: String },
     SetSoftKeyboard { on: bool },
     MobileState { payload: MobileStatePayload },
+    TabSnapshot(TabSnapshotPayload),
+    TabUpdate(TabUpdatePayload),
+    TabInventoryBatch(TabInventoryBatchPayload),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct InventoryMonitorReadyPayload {
+    pub web_client_id: String,
+    pub session_name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CapabilitiesPayload {
+    pub protocol_version: u32,
+    pub server_version: String,
+    pub capabilities: Vec<String>,
+    pub session_id: Option<String>,
+    pub session_name: Option<String>,
+}
+
+impl Default for CapabilitiesPayload {
+    fn default() -> Self {
+        Self {
+            protocol_version: 1,
+            server_version: zellij_utils::consts::VERSION.to_owned(),
+            capabilities: vec![],
+            session_id: None,
+            session_name: None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

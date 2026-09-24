@@ -59,7 +59,7 @@ use types::{
 };
 use utils::should_use_https;
 use uuid::Uuid;
-use websocket_handlers::{ws_handler_control, ws_handler_terminal};
+use websocket_handlers::{ws_handler_control, ws_handler_inventory, ws_handler_terminal};
 
 #[allow(dead_code)] // used in #[cfg(not(unix))] code path
 const DEFAULT_SERVER_STARTUP_TIMEOUT_SECS: u64 = 10;
@@ -240,6 +240,7 @@ pub async fn serve_web_client(
     let is_https = state.is_https;
     let app = Router::new()
         .route("/ws/control", any(ws_handler_control))
+        .route("/ws/inventory/{session}", any(ws_handler_inventory))
         .route("/ws/terminal", any(ws_handler_terminal))
         .route("/ws/terminal/{session}", any(ws_handler_terminal))
         .route("/session", post(create_new_client))

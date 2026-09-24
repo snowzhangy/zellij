@@ -2651,6 +2651,7 @@ pub(crate) fn route_thread_main(
                         ClientToServerMsg::AttachWatcherClient {
                             terminal_size,
                             is_web_client,
+                            inventory_only,
                         } => {
                             let allow_web_connections = session_data
                                 .read()
@@ -2667,6 +2668,7 @@ pub(crate) fn route_thread_main(
                                         client_id,
                                         terminal_size,
                                         is_web_client,
+                                        inventory_only,
                                     );
                                 to_server
                                     .send(attach_watcher_instruction)
@@ -2753,6 +2755,23 @@ pub(crate) fn route_thread_main(
                                 instruction,
                                 retry_queue
                             );
+                        },
+                        ClientToServerMsg::RequestTabSnapshot { session_id } => {
+                            if let Some(senders) = senders {
+                                let _ = senders.send_to_screen(ScreenInstruction::GetTabSnapshot {
+                                    client_id,
+                                    requested_session_id: session_id,
+                                });
+                            }
+                        },
+                        ClientToServerMsg::GoToTabById { session_id, tab_id } => {
+                            if let Some(senders) = senders {
+                                let _ = senders.send_to_screen(ScreenInstruction::GoToTabById {
+                                    session_id,
+                                    tab_id: tab_id as usize,
+                                    client_id,
+                                });
+                            }
                         },
                         ClientToServerMsg::SubscribeToPaneRenders {
                             ref pane_ids,

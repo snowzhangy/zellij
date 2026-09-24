@@ -236,9 +236,15 @@ impl From<ServerToClientMsg> for ClientInstruction {
             },
             // Subscribe-only messages — not handled by regular interactive clients
             ServerToClientMsg::PaneRenderUpdate { .. } => ClientInstruction::UnblockInputThread,
-            ServerToClientMsg::SubscribedPaneClosed { .. } => ClientInstruction::UnblockInputThread,
-            ServerToClientMsg::SetSoftKeyboard { .. } => ClientInstruction::UnblockInputThread,
-            ServerToClientMsg::MobileState { .. } => ClientInstruction::UnblockInputThread,
+            ServerToClientMsg::SubscribedPaneClosed { .. }
+            | ServerToClientMsg::SetSoftKeyboard { .. }
+            | ServerToClientMsg::MobileState { .. }
+            | ServerToClientMsg::TabSnapshot { .. }
+            | ServerToClientMsg::TabUpdate { .. }
+            | ServerToClientMsg::TabInventoryBatch { .. }
+            | ServerToClientMsg::SessionCapabilities { .. } => {
+                ClientInstruction::UnblockInputThread
+            },
         }
     }
 }
@@ -787,6 +793,13 @@ pub async fn run_remote_client_terminal_loop(
                             Ok(WebServerToWebClientControlMessage::MobileState{ .. }) => {
                                 // no-op
                             }
+                            Ok(WebServerToWebClientControlMessage::InventoryMonitorReady(_))
+                            | Ok(WebServerToWebClientControlMessage::Capabilities(_))
+                            | Ok(WebServerToWebClientControlMessage::TabSnapshot(_))
+                            | Ok(WebServerToWebClientControlMessage::TabUpdate(_))
+                            | Ok(WebServerToWebClientControlMessage::TabInventoryBatch(_)) => {
+                                // Inventory messages are consumed by the mobile web client.
+                            }
                             Err(e) => {
                                 log::debug!("Ignoring unrecognized control message: {}", e);
                             }
@@ -1068,6 +1081,7 @@ pub fn start_client(
                 ClientToServerMsg::AttachWatcherClient {
                     terminal_size: full_screen_ws,
                     is_web_client,
+                    inventory_only: false,
                 },
                 ipc_pipe,
             )
